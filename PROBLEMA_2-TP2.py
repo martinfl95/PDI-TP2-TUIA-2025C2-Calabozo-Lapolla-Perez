@@ -48,16 +48,15 @@ def obtener_recorte(imagen_path, visualizar=False, mostrar_pasos=False):
 
     for cnt in contornos:
         area_blob = cv2.contourArea(cnt)
-        if area_blob < 500:
-            continue
+        if area_blob < 500: continue
+
         bx, by, bw, bh = cv2.boundingRect(cnt)
-        if bh == 0:
-            continue
-        if float(bw) / bh < 1.5:
-            continue 
+        if bh == 0: continue
+        if float(bw) / bh < 1.5: continue 
 
         rect = cv2.minAreaRect(cnt)
         box_points = np.int32(cv2.boxPoints(rect))
+        
         d1 = np.linalg.norm(box_points[0] - box_points[1])
         d2 = np.linalg.norm(box_points[1] - box_points[2])
         
@@ -68,24 +67,22 @@ def obtener_recorte(imagen_path, visualizar=False, mostrar_pasos=False):
             long_side, short_side = d2, d1
             vec = box_points[1] - box_points[2]
             
-        if short_side == 0:
-            continue
+        if short_side == 0: continue
+        
         ratio = long_side / short_side
         area = long_side * short_side
         
         angle_deg = abs(np.degrees(np.arctan2(vec[1], vec[0]))) % 180
         angle_horiz = min(angle_deg, abs(180 - angle_deg))
         
-        if area > (area_roi * 0.2):
-            continue 
-        if ratio < 1.5 or ratio > 8.0:
-            continue 
-        if angle_horiz > 45:
-            continue 
+        if area > (area_roi * 0.2): continue 
+        if ratio < 1.5 or ratio > 8.0: continue 
+        if angle_horiz > 45: continue 
 
         mask = np.zeros_like(clean)
         cv2.drawContours(mask, [box_points], 0, 255, -1)
         val_medio = cv2.mean(clean, mask = mask)[0] / 255.0
+        
         if 0.15 < val_medio < 0.95:
              roi_thresh = thresh[by : by + bh, bx : bx + bw]
              if verificar_transiciones(roi_thresh):
@@ -93,7 +90,7 @@ def obtener_recorte(imagen_path, visualizar=False, mostrar_pasos=False):
                  candidatos.append((rect_global, ratio))
 
     mejor_candidato = None
-    mejor_score = 1000
+    mejor_score = float('inf')
     for cand in candidatos:
         r_struct, r_ratio = cand
         diff = abs(r_ratio - 3.2)
@@ -139,8 +136,7 @@ def obtener_recorte(imagen_path, visualizar=False, mostrar_pasos=False):
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 2, 1); plt.title("Detección"); plt.imshow(cv2.cvtColor(viz_img, cv2.COLOR_BGR2RGB))
         plt.subplot(1, 2, 2); plt.title("Recorte"); 
-        if roi_patente is not None:
-            plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
+        if roi_patente is not None: plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
         else: plt.text(0.5, 0.5, "No detectado", ha='center')
         plt.show()
 
@@ -154,7 +150,6 @@ for i in range(1, 13):
         lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
     else:
         print(f"[X] {nombre_archivo}: No se detectó patente.")
-
 
 cols = 4
 rows = (len(lista_patentes) // cols) + 1
