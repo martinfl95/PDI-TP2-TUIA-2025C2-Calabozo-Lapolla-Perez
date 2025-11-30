@@ -22,106 +22,107 @@ def imfillhole(img):
     img_fh = cv2.bitwise_not(img_r)                         
     return img_fh
 
-def segmentacion_por_pasos(imagen_path):
-    img = cv2.imread(imagen_path)
+def segmentacion_contornos(imagen, etapas = []):
+    img = cv2.imread(imagen)
     if img is None: 
         print("Error: No se pudo cargar la imagen.")
         return
 
     # ---------------------------------------------------------
-    # Preprocesamiento
+    # Etapa 1: Preprocesamiento
     # ---------------------------------------------------------
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.medianBlur(gray, 5)
 
     # GRAFICO 1: Original + Blur
-    plt.figure(figsize=(12, 6))
-    plt.suptitle("ETAPA 1: Preprocesamiento", fontsize=16)
-    
-    plt.subplot(121)
-    plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    plt.title("Original")
-    plt.axis('off')
+    if 1 in etapas:
+        plt.figure(figsize=(12, 6))
+        plt.suptitle("ETAPA 1: Preprocesamiento", fontsize=16)
+        
+        plt.subplot(121)
+        plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        plt.title("Original")
+        plt.axis('off')
 
-    plt.subplot(122)
-    plt.imshow(blur, cmap='gray')
-    plt.title("Filtro Mediana (k=5)")
-    plt.axis('off')
-    plt.show()
+        plt.subplot(122)
+        plt.imshow(blur, cmap='gray')
+        plt.title("Filtro Mediana (k=5)")
+        plt.axis('off')
+        plt.show()
 
     # ---------------------------------------------------------
-    # Segmentación y Morfología
+    # Etapa 2 : Segmentación y Morfología
     # ---------------------------------------------------------
     # 1. Canny
     bordes = cv2.Canny(blur, 45, 145)
-
-    # 2. Close (Clausura)
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-    bordes_cerrados = cv2.morphologyEx(bordes, cv2.MORPH_CLOSE, kernel_close)
     
-    # 3. Dilatación
+    # 2. Dilatación
     kernel_dilatacion = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21,21))
-    bordes_gruesos = cv2.dilate(bordes_cerrados, kernel_dilatacion, iterations=2)
+    bordes_gruesos = cv2.dilate(bordes, kernel_dilatacion, iterations=2)
     
-    # 4. Relleno
+    # 3. Relleno
     mascara_rellenada = imfillhole(bordes_gruesos)
     
-    # 5. Erosión (Vuelta al tamaño real)
+    # 4. Erosión (Vuelta al tamaño real)
     mascara_erosion = cv2.erode(mascara_rellenada, kernel_dilatacion, iterations=2)
     
-    # 6. Lijado Final
+    # 5. Filtrado de ruido final
     mascara_final = cv2.medianBlur(mascara_erosion, 13)
 
     # GRAFICO 2: Pipeline Morfológico
-    plt.figure(figsize=(16, 5))
-    plt.suptitle("ETAPA 2: Segmentación y Relleno", fontsize=16)
+    if 2 in etapas:
+        plt.figure(figsize=(16, 5))
+        plt.suptitle("ETAPA 2: Segmentación y Relleno", fontsize=16)
 
-    plt.subplot(141)
-    plt.imshow(bordes, cmap='gray')
-    plt.title("1. Canny")
-    plt.axis('off')
+        plt.subplot(231)
+        plt.imshow(bordes, cmap='gray')
+        plt.title("1. Canny")
+        plt.axis('off')
 
-    plt.subplot(142)
-    plt.imshow(bordes_cerrados, cmap='gray')
-    plt.title("2. Close (31x31)")
-    plt.axis('off')
-
-    plt.subplot(143)
-    plt.imshow(bordes_gruesos, cmap='gray')
-    plt.title("3. Dilate (21x21)")
-    plt.axis('off')
-    
-    plt.subplot(144)
-    plt.imshow(mascara_rellenada, cmap='gray')
-    plt.title("4. Relleno Final")
-    plt.axis('off')
-    plt.show()
-
+        plt.subplot(232)
+        plt.imshow(bordes_gruesos, cmap='gray')
+        plt.title("3. Dilate (21x21)")
+        plt.axis('off')
+        
+        plt.subplot(233)
+        plt.imshow(mascara_rellenada, cmap='gray')
+        plt.title("4. Relleno")
+        plt.axis('off')
+        
+        plt.subplot(234)
+        plt.imshow(mascara_erosion, cmap='gray')
+        plt.title("5. Erosion (21x21)")
+        plt.axis('off')
+        
+        plt.subplot(236)
+        plt.imshow(mascara_final, cmap='gray')
+        plt.title("6. Filtro de Mediana (13x13)")
+        plt.axis('off')
+        plt.show()
     # ---------------------------------------------------------
-    # Clasificación y Resultado
+    # Etapa 3:  Clasificación y Resultado
     # ---------------------------------------------------------
     contours_final, _ = cv2.findContours(mascara_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+    mascara_monedas = np.zeros((img.shape[1], img.shape[0]), dtype=np.uint8)
+    mascara_dados = np.zeros((img.shape[1], img.shape[0]), dtype=np.uint8)
     img_out = img.copy()
     monedas_count = 0
     dados_count = 0
+    contornos_monedas = [{}]
+    contornos_dados =[{}]
     
     print(f"{'TIPO':<10} | {'AREA':<8} | {'METRICA (P^2/A)':<20}")
     print("-" * 50)
 
-    for cnt in contours_final:
+    for i, cnt in enumerate(contours_final):
         area = cv2.contourArea(cnt)
         #Eliminamos contornos que no posean un area factible
         if area < 1000: continue 
-        #Calculamos el perímetro...
+        #Calculamos el perímetro
         perimetro = cv2.arcLength(cnt, True)
-        #Suavizamos el perímetro para obtener máscaras con menor ruido
-        epsilon = 0.007 * perimetro
-        cnt_suave = cv2.approxPolyDP(cnt, epsilon, True)
-        perimetro_suave = cv2.arcLength(cnt_suave, True)
         if area == 0: continue
         #Calculamos el factor de forma
-        metrica = (perimetro_suave ** 2) / area
+        metrica = (perimetro ** 2) / area
         
         M = cv2.moments(cnt)
         if M["m00"] != 0:
@@ -131,25 +132,64 @@ def segmentacion_por_pasos(imagen_path):
         #Tuvimos que modificar la métrica para que captara correctamente las monedas y los dados
         #No podemos encontrar una combinación que nos dé perfectamente el contorno de cada elemento
         #como para implementar el mínimo y máximos teóricos
-        if metrica > 13.5: 
+        if metrica > 15.5: 
             dados_count += 1
             color = (0, 0, 255) # Rojo
             etiqueta = f"D {metrica:.1f}"
             print(f"{'DADO':<10} | {int(area):<8} | {metrica:.4f}")
+            contornos_monedas.append({'id': i, 'dado': cnt, 'area': area, 'centro': (cY,cX), 'metrica': metrica})
+            cv2.putText(img_out, etiqueta, (cX - 400, cY), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
         else:
             monedas_count += 1
             color = (0, 255, 0) # Verde
             etiqueta = f"M {metrica:.1f}"
             print(f"{'MONEDA':<10} | {int(area):<8} | {metrica:.4f}")
+            contornos_monedas.append({'id': i, 'moneda': cnt, 'area': area, 'centro': (cY,cX), 'metrica': metrica})
+            cv2.putText(img_out, etiqueta, (cX - 400, cY), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
+        cv2.drawContours(img_out, [cnt], -1, color, 3)
+        
+    if 3 in etapas:
+        plt.figure(figsize=(12, 10))
+        plt.imshow(cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB))
+        plt.title(f"ETAPA 3: Detección - {monedas_count} Monedas - {dados_count} Dados - Factor de Forma: 15.5", fontsize=16)
+        plt.axis('off')
+        plt.show()
+    
+    return contornos_monedas, contornos_dados
+
+def normalizar_contornos(contorno_monedas: list, imagen, graficar: bool = False):
+    monedas_elipses = []
+    img_out = None
+    if graficar:
+            temp_img = cv2.imread(imagen)
+            if temp_img is None:
+                print("Error: No se pudo cargar la imagen para graficar.")
+                return []
+            img_out = temp_img.copy()
             
-        cv2.drawContours(img_out, [cnt_suave], -1, color, 3)
-        cv2.putText(img_out, etiqueta, (cX - 30, cY), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+    for item in contorno_monedas:
+            cnt = item['moneda']
+            elipse = cv2.fitEllipse(cnt)
+            monedas_elipses.append(elipse)
+            if graficar and img_out is not None:
+                cv2.ellipse(img_out, elipse, (0, 255, 0), 3)
+                center = (int(elipse[0][0]), int(elipse[0][1]))
+                cv2.circle(img_out, center, 5, (0, 0, 255), -1)
 
-    plt.figure(figsize=(12, 10))
-    plt.imshow(cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB))
-    plt.title(f"ETAPA 3: Resultado Final | {monedas_count} Monedas | {dados_count} Dados", fontsize=16)
-    plt.axis('off')
-    plt.show()
-
-# Ejecutar
-segmentacion_por_pasos('monedas.jpg')
+    if graficar and img_out is not None:
+        plt.figure(figsize=(12, 12))
+        plt.imshow(cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB))
+        plt.title(f"Normalización: {len(monedas_elipses)} Elipses Ajustadas")
+        plt.axis('off')
+        plt.show()
+        
+    return monedas_elipses
+#Para observar los pasos intermedios pueden agregar el identificador de etapas
+#Pseudocódigo -
+#Etapa 1: Preprocesamiento - filtro mediana sobre imagen original para suavizar bordes
+#Etapa 2: Morfología - Tratamiento de imagen para segmentar contornos
+#Etapa 3: Clasificación - Utilizando factor de forma encontramos dados o monedas
+#Etapa 4: Clasificación Monedas - Utilizando color y area diferenciamos los tipos
+#Etapa 5: Clasificacion Dados - Utilizando contornos internos
+contornos_monedas, contornos_dados = segmentacion_contornos('monedas.jpg') #Etapa 1, 2 y 3
+contornos_monedas_normalizados = normalizar_contornos(contornos_monedas, 'monedas.jpg', True) #Etapa 3.1
