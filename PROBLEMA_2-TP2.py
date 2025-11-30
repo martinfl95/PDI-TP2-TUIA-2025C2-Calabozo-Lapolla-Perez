@@ -1,12 +1,10 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import os
 
 def verificar_transiciones(imagen_binaria_roi):
     """
-    Función para derminar si en la imagen que recibe de entrada hay un objeto
-    que contenga texto, caso de la patente, o no
+    Verifica si una región binarizada posee la textura esperada de una patente (texto).
     """
     h, w = imagen_binaria_roi.shape
     if h == 0 or w == 0: return False
@@ -17,14 +15,11 @@ def verificar_transiciones(imagen_binaria_roi):
             transiciones += 1
     return 3 <= transiciones <= 50
 
-def obtener_recorte(imagen, visualizar = False):
+def obtener_recorte(imagen_path, visualizar=False, mostrar_pasos=False):
     """
-    
+    Localiza y recorta la placa patente utilizando morfología.
     """
-    if not os.path.exists(imagen): 
-        return None
-    
-    img = cv2.imread(imagen)
+    img = cv2.imread(imagen_path)
     h_img, w_img = img.shape[:2]
     p_arriba, p_abajo, p_lados = 0.25, 0.05, 0.20
     y_ini = int(h_img * p_arriba)
@@ -32,22 +27,21 @@ def obtener_recorte(imagen, visualizar = False):
     x_ini = int(w_img * p_lados)
     x_fin = int(w_img * (1 - p_lados))
     roi = img[y_ini:y_fin, x_ini:x_fin]
-
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit = 2.0, tileGridSize = (8,8))
-    gray = clahe.apply(gray)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    gray_eq = clahe.apply(gray)
+    blur = cv2.GaussianBlur(gray_eq, (5, 5), 0)
     sobelx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize = 3)
-    sobelx = cv2.convertScaleAbs(sobelx)
-    _, thresh = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    sobelx_abs = cv2.convertScaleAbs(sobelx)
+    _, thresh = cv2.threshold(sobelx_abs, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
     clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_vertical)
     kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 3))
     morf = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel_horizontal)
-
     contornos, _ = cv2.findContours(morf, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     candidatos = []
     area_roi = roi.shape[0] * roi.shape[1]
+    
     if visualizar:
         viz_img = img.copy()
         cv2.rectangle(viz_img, (x_ini, y_ini), (x_fin, y_fin), (255, 0, 0), 2)
@@ -56,11 +50,9 @@ def obtener_recorte(imagen, visualizar = False):
         area_blob = cv2.contourArea(cnt)
         if area_blob < 500:
             continue
-
         bx, by, bw, bh = cv2.boundingRect(cnt)
         if bh == 0:
             continue
-    
         if float(bw) / bh < 1.5:
             continue 
 
@@ -76,25 +68,24 @@ def obtener_recorte(imagen, visualizar = False):
             long_side, short_side = d2, d1
             vec = box_points[1] - box_points[2]
             
-        if short_side == 0: continue
-        
+        if short_side == 0:
+            continue
         ratio = long_side / short_side
         area = long_side * short_side
+        
         angle_deg = abs(np.degrees(np.arctan2(vec[1], vec[0]))) % 180
         angle_horiz = min(angle_deg, abs(180 - angle_deg))
+        
         if area > (area_roi * 0.2):
-            
             continue 
         if ratio < 1.5 or ratio > 8.0:
             continue 
-
         if angle_horiz > 45:
             continue 
 
         mask = np.zeros_like(clean)
         cv2.drawContours(mask, [box_points], 0, 255, -1)
         val_medio = cv2.mean(clean, mask = mask)[0] / 255.0
-        
         if 0.15 < val_medio < 0.95:
              roi_thresh = thresh[by : by + bh, bx : bx + bw]
              if verificar_transiciones(roi_thresh):
@@ -103,7 +94,6 @@ def obtener_recorte(imagen, visualizar = False):
 
     mejor_candidato = None
     mejor_score = 1000
-    
     for cand in candidatos:
         r_struct, r_ratio = cand
         diff = abs(r_ratio - 3.2)
@@ -127,39 +117,53 @@ def obtener_recorte(imagen, visualizar = False):
         if w_s > 0 and h_s > 0:
             roi_patente = img[y_s:y_s+h_s, x_s:x_s+w_s]
 
-    if visualizar:
+    if mostrar_pasos:
+        plt.figure(figsize=(16, 8))
+        plt.subplot(2, 3, 1); plt.imshow(gray, cmap='gray'); plt.title("1. ROI Grises")
+        plt.subplot(2, 3, 2); plt.imshow(sobelx_abs, cmap='gray'); plt.title("2. Sobel Vertical")
+        plt.subplot(2, 3, 3); plt.imshow(thresh, cmap='gray'); plt.title("3. Umbralado (Otsu)")
+        plt.subplot(2, 3, 4); plt.imshow(clean, cmap='gray'); plt.title("4. Limpieza Vertical")
+        plt.subplot(2, 3, 5); plt.imshow(morf, cmap='gray'); plt.title("5. Unión Horizontal")
+        plt.subplot(2, 3, 6)
+        if roi_patente is not None:
+            plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
+            plt.title("6. Resultado")
+        else:
+            plt.text(0.5, 0.5, "No detectado", ha='center')
+            plt.title("6. Resultado")
+            
+        plt.tight_layout()
+        plt.show()
+
+    if visualizar and not mostrar_pasos: # Si solo se quiere ver el resultado final
         plt.figure(figsize=(12, 5))
-        plt.subplot(1, 2, 1); plt.title("Detección V13"); plt.imshow(cv2.cvtColor(viz_img, cv2.COLOR_BGR2RGB))
-        plt.subplot(1, 2, 2); plt.title("Recorte Retornado"); 
-        if roi_patente is not None: plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
-        else: plt.text(0.5, 0.5, "No detectado", ha = 'center')
+        plt.subplot(1, 2, 1); plt.title("Detección"); plt.imshow(cv2.cvtColor(viz_img, cv2.COLOR_BGR2RGB))
+        plt.subplot(1, 2, 2); plt.title("Recorte"); 
+        if roi_patente is not None:
+            plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
+        else: plt.text(0.5, 0.5, "No detectado", ha='center')
         plt.show()
 
     return roi_patente
 
 lista_patentes = []
 for i in range(1, 13):
-    imagen = f'img{i:02d}.png'
-    recorte = obtener_recorte(imagen, visualizar=False)
+    nombre_archivo = f'img{i:02d}.png'
+    recorte = obtener_recorte(nombre_archivo, visualizar=False, mostrar_pasos=False) #mostrar_pasos=True para ver el procesamiento de cada imagen
     if recorte is not None:
-        lista_patentes.append({
-            "nombre": imagen,
-            "imagen": recorte
-        })
+        lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
     else:
-        print(f"[X]  {imagen}: No se detectó patente.")
+        print(f"[X] {nombre_archivo}: No se detectó patente.")
 
-if len(lista_patentes) > 0:
-    cols = 4
-    rows = (len(lista_patentes) // cols) + 1
-    plt.figure(figsize=(15, rows * 3))
-    for idx, item in enumerate(lista_patentes):
-            imagen_bgr = item['imagen']
-            imagen_rgb = cv2.cvtColor(imagen_bgr, cv2.COLOR_BGR2RGB)
-            plt.subplot(rows, cols, idx + 1)
-            plt.imshow(imagen_rgb)
-            plt.title(item['nombre'])
-            plt.axis('off')
-        
-    plt.tight_layout()
-    plt.show()
+
+cols = 4
+rows = (len(lista_patentes) // cols) + 1
+plt.figure(figsize=(15, rows * 3))
+for idx, item in enumerate(lista_patentes):
+    imagen_rgb = cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB)
+    plt.subplot(rows, cols, idx + 1)
+    plt.imshow(imagen_rgb)
+    plt.title(item['nombre'])
+    plt.axis('off')
+plt.tight_layout()
+plt.show()
