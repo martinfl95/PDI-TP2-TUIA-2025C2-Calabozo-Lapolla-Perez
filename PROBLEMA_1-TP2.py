@@ -81,22 +81,22 @@ def segmentacion_contornos(imagen, etapas = []):
 
         plt.subplot(232)
         plt.imshow(bordes_gruesos, cmap='gray')
-        plt.title("3. Dilate (21x21)")
+        plt.title("2. Dilate (21x21)")
         plt.axis('off')
         
         plt.subplot(233)
         plt.imshow(mascara_rellenada, cmap='gray')
-        plt.title("4. Relleno")
+        plt.title("3. Relleno")
         plt.axis('off')
         
         plt.subplot(234)
         plt.imshow(mascara_erosion, cmap='gray')
-        plt.title("5. Erosion (21x21)")
+        plt.title("4. Erosion (21x21)")
         plt.axis('off')
         
         plt.subplot(236)
         plt.imshow(mascara_final, cmap='gray')
-        plt.title("6. Filtro de Mediana (13x13)")
+        plt.title("5. Filtro de Mediana (13x13)")
         plt.axis('off')
         plt.show()
     # ---------------------------------------------------------
@@ -108,8 +108,8 @@ def segmentacion_contornos(imagen, etapas = []):
     img_out = img.copy()
     monedas_count = 0
     dados_count = 0
-    contornos_monedas = [{}]
-    contornos_dados =[{}]
+    contornos_monedas = []
+    contornos_dados = []
     
     print(f"{'TIPO':<10} | {'AREA':<8} | {'METRICA (P^2/A)':<20}")
     print("-" * 50)
@@ -124,20 +124,22 @@ def segmentacion_contornos(imagen, etapas = []):
         #Calculamos el factor de forma
         metrica = (perimetro ** 2) / area
         
+        #Encontramos el centro de los contornos
         M = cv2.moments(cnt)
         if M["m00"] != 0:
             cX = int(M["m10"] / M["m00"])
             cY = int(M["m01"] / M["m00"])
         else: cX, cY = 0, 0
+        
         #Tuvimos que modificar la métrica para que captara correctamente las monedas y los dados
         #No podemos encontrar una combinación que nos dé perfectamente el contorno de cada elemento
-        #como para implementar el mínimo y máximos teóricos
+        #como para implementar los valores teóricos
         if metrica > 15.5: 
             dados_count += 1
             color = (0, 0, 255) # Rojo
             etiqueta = f"D {metrica:.1f}"
             print(f"{'DADO':<10} | {int(area):<8} | {metrica:.4f}")
-            contornos_monedas.append({'id': i, 'dado': cnt, 'area': area, 'centro': (cY,cX), 'metrica': metrica})
+            contornos_dados.append({'id': i, 'dado': cnt, 'area': area, 'centro': (cY,cX), 'metrica': metrica})
             cv2.putText(img_out, etiqueta, (cX - 400, cY), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 2)
         else:
             monedas_count += 1
@@ -157,7 +159,7 @@ def segmentacion_contornos(imagen, etapas = []):
     
     return contornos_monedas, contornos_dados
 
-def normalizar_contornos(contorno_monedas: list, imagen, graficar: bool = False):
+def normalizar_contornos(contorno_monedas: list, imagen: str= 'monedas.jpg', graficar: bool = False):
     monedas_elipses = []
     img_out = None
     if graficar:
@@ -169,27 +171,101 @@ def normalizar_contornos(contorno_monedas: list, imagen, graficar: bool = False)
             
     for item in contorno_monedas:
             cnt = item['moneda']
+            #Elipse de area mínima segun nuestro contorno
             elipse = cv2.fitEllipse(cnt)
             monedas_elipses.append(elipse)
             if graficar and img_out is not None:
+                #Elipse calculada
                 cv2.ellipse(img_out, elipse, (0, 255, 0), 3)
                 center = (int(elipse[0][0]), int(elipse[0][1]))
+                #Centro de la elipse
                 cv2.circle(img_out, center, 5, (0, 0, 255), -1)
 
     if graficar and img_out is not None:
         plt.figure(figsize=(12, 12))
         plt.imshow(cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB))
-        plt.title(f"Normalización: {len(monedas_elipses)} Elipses Ajustadas")
+        plt.title("Normalización: Elipses Ajustadas al Contorno original")
         plt.axis('off')
         plt.show()
         
     return monedas_elipses
-#Para observar los pasos intermedios pueden agregar el identificador de etapas
-#Pseudocódigo -
-#Etapa 1: Preprocesamiento - filtro mediana sobre imagen original para suavizar bordes
-#Etapa 2: Morfología - Tratamiento de imagen para segmentar contornos
-#Etapa 3: Clasificación - Utilizando factor de forma encontramos dados o monedas
-#Etapa 4: Clasificación Monedas - Utilizando color y area diferenciamos los tipos
-#Etapa 5: Clasificacion Dados - Utilizando contornos internos
-contornos_monedas, contornos_dados = segmentacion_contornos('monedas.jpg') #Etapa 1, 2 y 3
-contornos_monedas_normalizados = normalizar_contornos(contornos_monedas, 'monedas.jpg', True) #Etapa 3.1
+
+def clasificar_monedas(elipses_monedas: list, imagen: str = 'monedas.jpg', graficar: bool = False):
+    img = plt.imread(imagen)
+    img_out = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    resultados = [] 
+    corte_10_c = 74000
+    corte_50_c = 94000
+
+    print(f"{'ID':<5} | {'AREA':<10} | {'TIPO':<15}")
+    print("-" * 40)
+
+    for i, elipse in enumerate(elipses_monedas):
+        (cX, cY), (w, h), angle = elipse
+        #Cálculo de area de elipse Pi*DiagMen*DiagMay/4
+        area_elipse = (np.pi * w * h) / 4
+        center = (int(cX), int(cY))
+        
+        if area_elipse < corte_10_c:
+            etiqueta = "10C" 
+            color_elipse = (0, 255, 255)
+            
+        elif area_elipse < corte_50_c:
+            etiqueta = "1P"
+            color_elipse = (255, 0, 0) 
+            
+        else:
+            etiqueta = "50C"
+            color_elipse = (0, 0, 255)
+            
+        resultados.append({
+            'id': i,
+            'area': area_elipse,
+            'clasificacion': etiqueta,
+            'centro': center
+        })
+        
+        #Print de resultados para encontrar umbrales de separación
+        print(f"{i:<5} | {int(area_elipse):<10} | {etiqueta}")
+        
+        if graficar and img_out is not None:
+            cv2.ellipse(img_out, elipse, color_elipse, 2)
+            cv2.putText(img_out, etiqueta, (center[0]-300, center[1]), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, color_elipse, 4, cv2.LINE_AA)
+
+    if graficar and img_out is not None:
+        plt.figure(figsize=(12, 12))
+        plt.imshow(cv2.cvtColor(img_out, cv2.COLOR_BGR2RGB))
+        plt.title("Clasificación por Tamaño (Area de la Elipse)")
+        plt.axis('off')
+        plt.show()
+        
+    return resultados
+
+def clasificar_dados(dados_detectados: list, imagen, graficar: bool = True):
+    pass
+
+if __name__ == '__main__':
+    '''
+    etapas: ([1,2,3] | []) - corresponde a los gráficos de cada paso específico. Ej: etapas = [1,2] grafica el procedimiento
+    de las primeras dos etapas
+    
+    graficar_monedas (True | False): desarrollo de la etapa de normalización
+    
+    graficar_clasificacion_monedas (True | False): desarrollo de la etapa de clasificación
+    
+    graficar_dados (True | False): desarrollo de la etapa de clasificación de dados
+    '''
+    #Etapa 1: Preprocesamiento - filtro mediana sobre imagen original para suavizar bordes
+    #Etapa 2: Morfología - Tratamiento de imagen para segmentar contornos
+    #Etapa 3: Clasificación - Utilizando factor de forma encontramos dados o monedas
+    #Etapa 4: Normalización de contornos - Encontramos una elipse de minimo tamaño que regularice los contornos encontrados
+    #Etapa 5: Clasificación Monedas - Utilizando el area de cada moneda diferenciamos los tipos
+    #Etapa 6: Clasificacion Dados - Utilizando contornos internos y factor de forma encontramos el valor de la cara
+    etapas = [1,2,3]
+    graficar_monedas = True
+    graficar_clasificacion_monedas = True
+    contornos_monedas, contornos_dados = segmentacion_contornos('monedas.jpg', etapas = etapas)
+    contornos_monedas_normalizados = normalizar_contornos(contornos_monedas, 'monedas.jpg', graficar_monedas)
+    resultados_monedas = clasificar_monedas(contornos_monedas_normalizados, 'monedas.jpg', graficar_clasificacion_monedas)
+    resultados_dados = clasificar_dados(contornos_dados, 'moneda.jpg', True)

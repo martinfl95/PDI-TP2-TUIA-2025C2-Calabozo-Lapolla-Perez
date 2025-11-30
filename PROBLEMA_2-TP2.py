@@ -1,256 +1,221 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
-def clear_border(img_bin):
+def verificar_transiciones(imagen_binaria_roi):
+    h, w = imagen_binaria_roi.shape
+    if h == 0 or w == 0: return False
+    linea_central = imagen_binaria_roi[h // 2, :]
+    transiciones = 0
+    for i in range(len(linea_central) - 1):
+        if linea_central[i] != linea_central[i+1]:
+            transiciones += 1
+    return 3 <= transiciones <= 50
+
+def obtener_recorte_v13(imagen_path, visualizar=False):
     """
-    Elimina componentes conectados que tocan el borde de la imagen
-    usando reconstrucción morfológica por dilatación.
-    img_bin: imagen binaria 0/255 con objetos en blanco.
+    Lógica V13: Morfología Direccional (Limpieza Vertical + Unión Horizontal).
+    Retorna: El recorte de la patente (imagen color) o None si falla.
     """
-    img = img_bin.copy().astype(np.uint8)
-    h, w = img.shape[:2]
-
-    # Marcador: sólo los pixeles de borde
-    marker = np.zeros_like(img, dtype=np.uint8)
-    marker[0, :]   = img[0, :]
-    marker[-1, :]  = img[-1, :]
-    marker[:, 0]   = img[:, 0]
-    marker[:, -1]  = img[:, -1]
-
-    kernel = np.ones((3, 3), np.uint8)
-
-    prev = np.zeros_like(img, dtype=np.uint8)
-    while True:
-        marker = cv2.dilate(marker, kernel)
-        marker = cv2.bitwise_and(marker, img)
-        if np.array_equal(marker, prev):
-            break
-        prev = marker.copy()
-
-    # Resto esos objetos de la imagen original
-    img_cb = cv2.subtract(img, marker)
-    return img_cb
-
-# ------------------------------------------------------------------
-# FUNCIÓN A: DETECCIÓN Y SEGMENTACIÓN DE LA PATENTE (PUNTO A)
-# Basada en Sobel + Otsu + Morfología (Unidad 2, 3 y 6)
-# ------------------------------------------------------------------
-def segmentar_patente_robusta(imagen_path, mostrar=True):
+    if not os.path.exists(imagen_path): return None
     img = cv2.imread(imagen_path)
-    if img is None:
-        print(f"[ERROR] No se pudo cargar la imagen {imagen_path}")
-        return []
+    if img is None: return None
 
-    # Paso 1: gris
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # --- 1. ROI (Configuración V13) ---
+    h_img, w_img = img.shape[:2]
+    # 25% arriba, 5% abajo, 20% lados
+    p_top, p_bottom, p_side = 0.25, 0.05, 0.20
+    y_ini = int(h_img * p_top)
+    y_fin = int(h_img * (1 - p_bottom))
+    x_ini = int(w_img * p_side)
+    x_fin = int(w_img * (1 - p_side))
+    
+    roi = img[y_ini:y_fin, x_ini:x_fin]
+    if roi.size == 0: return None
 
-    # Paso 2: normalización de iluminación (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray_eq = clahe.apply(gray)
+    # --- 2. PREPROCESAMIENTO ---
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Paso 3: suavizado (Gaussiano)
-    blur = cv2.GaussianBlur(gray_eq, (5, 5), 0)
-
-    # Paso 4: Sobel en x (bordes verticales)
+    # --- 3. BORDES ---
     sobelx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
     sobelx = cv2.convertScaleAbs(sobelx)
+    _, thresh = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Paso 5: Umbralado (Otsu)
-    _, thresh = cv2.threshold(
-        sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
+    # --- 4. MORFOLOGÍA DIRECCIONAL (La clave de V13) ---
+    # A. Limpieza Vertical (Mata adoquines)
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
+    clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_vertical)
+    
+    # B. Conexión Horizontal (Une letras)
+    kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 3))
+    morf = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel_horizontal)
 
-    # Paso 6: Clausura morfológica para unir bordes verticales
-    elemento = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
-    morf = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, elemento)
+    # --- 5. ANÁLISIS ---
+    contornos, _ = cv2.findContours(morf, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidatos = []
+    area_roi = roi.shape[0] * roi.shape[1]
 
-    # Paso 7: Contornos candidatos a placa
-    contornos, _ = cv2.findContours(
-        morf, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    patentes_candidatas = []
-    debug_img = img.copy()
-
-    # Ordenamos contornos por área (mayores primero)
-    contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:15]
+    if visualizar:
+        debug_img = img.copy()
+        cv2.rectangle(debug_img, (x_ini, y_ini), (x_fin, y_fin), (255, 0, 0), 2)
 
     for cnt in contornos:
-        x, y, w, h = cv2.boundingRect(cnt)
-        aspect_ratio = w / float(h)
-        area = w * h
+        # Filtros rápidos
+        area_blob = cv2.contourArea(cnt)
+        if area_blob < 500: continue
 
-        # Filtros geométricos relajados para placa
-        if 1.5 < aspect_ratio < 6.0 and area > 300:
-            # Densidad de pixeles blancos dentro del ROI binario
-            roi_bin = thresh[y:y+h, x:x+w]
-            white_pixels = cv2.countNonZero(roi_bin)
-            density = white_pixels / (w * h + 1e-6)
+        bx, by, bw, bh = cv2.boundingRect(cnt)
+        if bh == 0: continue
+        if float(bw) / bh < 1.5: continue 
 
-            if 0.2 < density < 0.8:
-                # Pequeño padding para no cortar caracteres
-                pad_w = int(w * 0.05)
-                pad_h = int(h * 0.15)
-                x_cut = max(0, x - pad_w)
-                y_cut = max(0, y - pad_h)
-                w_cut = min(img.shape[1] - x_cut, w + 2 * pad_w)
-                h_cut = min(img.shape[0] - y_cut, h + 2 * pad_h)
+        # Análisis Fino
+        rect = cv2.minAreaRect(cnt)
+        box = np.int32(cv2.boxPoints(rect))
+        
+        d1 = np.linalg.norm(box[0] - box[1])
+        d2 = np.linalg.norm(box[1] - box[2])
+        
+        if d1 > d2:
+            long_side, short_side = d1, d2
+            vec = box[0] - box[1]
+        else:
+            long_side, short_side = d2, d1
+            vec = box[1] - box[2]
+            
+        if short_side == 0: continue
+        
+        ratio = long_side / short_side
+        area = long_side * short_side
+        
+        # Ángulo
+        angle_deg = abs(np.degrees(np.arctan2(vec[1], vec[0]))) % 180
+        angle_horiz = min(angle_deg, abs(180 - angle_deg))
 
-                roi_color = img[y_cut:y_cut+h_cut, x_cut:x_cut+w_cut]
+        # Filtros V13 estrictos
+        if area > (area_roi * 0.2): continue 
+        if ratio < 1.5 or ratio > 8.0: continue 
+        if angle_horiz > 45: continue 
 
-                # Chequeo tamaño lógico
-                if roi_color.shape[0] > 10 and roi_color.shape[1] > 10:
-                    patentes_candidatas.append(roi_color)
-                    cv2.rectangle(
-                        debug_img, (x_cut, y_cut),
-                        (x_cut + w_cut, y_cut + h_cut),
-                        (0, 255, 0), 2
-                    )
+        # Contenido
+        mask = np.zeros_like(clean)
+        cv2.drawContours(mask, [box], 0, 255, -1)
+        val_medio = cv2.mean(clean, mask=mask)[0] / 255.0
+        
+        if 0.15 < val_medio < 0.95:
+             roi_thresh = thresh[by:by+bh, bx:bx+bw]
+             if verificar_transiciones(roi_thresh):
+                 # Guardar ajustando coordenadas al original
+                 rect_global = ((rect[0][0] + x_ini, rect[0][1] + y_ini), (rect[1][0], rect[1][1]), rect[2])
+                 candidatos.append((rect_global, ratio))
 
-    if mostrar:
-        plt.figure(figsize=(13, 4))
-        plt.subplot(1, 4, 1)
-        plt.title("Gris + CLAHE")
-        plt.imshow(gray_eq, cmap='gray')
-        plt.axis("off")
+    # --- 6. SELECCIÓN ---
+    mejor_candidato = None
+    mejor_score = 1000
+    
+    for cand in candidatos:
+        r_struct, r_ratio = cand
+        diff = abs(r_ratio - 3.2)
+        if diff < mejor_score:
+            mejor_score = diff
+            mejor_candidato = r_struct
 
-        plt.subplot(1, 4, 2)
-        plt.title("Sobel X")
-        plt.imshow(sobelx, cmap='gray')
-        plt.axis("off")
+    # --- 7. EXTRACCIÓN Y RETORNO ---
+    roi_patente = None
+    
+    if mejor_candidato:
+        box = np.int32(cv2.boxPoints(mejor_candidato))
+        
+        # Visualización en Debug
+        if visualizar:
+            cv2.drawContours(debug_img, [box], 0, (0, 255, 0), 3)
 
-        plt.subplot(1, 4, 3)
-        plt.title("Otsu + Clausura")
-        plt.imshow(morf, cmap='gray')
-        plt.axis("off")
+        # Recorte Seguro (Axis Aligned) con un pequeño margen
+        x, y, w, h = cv2.boundingRect(box)
+        
+        # Padding del 10% para no cortar bordes
+        pad_w = int(w * 0.10)
+        pad_h = int(h * 0.10)
+        
+        x_s = max(0, x - pad_w)
+        y_s = max(0, y - pad_h)
+        w_s = min(w + 2*pad_w, img.shape[1] - x_s)
+        h_s = min(h + 2*pad_h, img.shape[0] - y_s)
+        
+        if w_s > 0 and h_s > 0:
+            roi_patente = img[y_s:y_s+h_s, x_s:x_s+w_s]
 
-        plt.subplot(1, 4, 4)
-        plt.title(f"Patentes detectadas: {len(patentes_candidatas)}")
-        plt.imshow(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB))
-        plt.axis("off")
-        plt.suptitle(f"Detección de placa - {imagen_path}")
-        plt.tight_layout()
+    # Plot opcional
+    if visualizar:
+        plt.figure(figsize=(12, 5))
+        plt.subplot(1, 2, 1); plt.title("Detección V13"); plt.imshow(cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB))
+        plt.subplot(1, 2, 2); plt.title("Recorte Retornado"); 
+        if roi_patente is not None: plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
+        else: plt.text(0.5, 0.5, "No detectado", ha='center')
         plt.show()
 
-    return patentes_candidatas
+    return roi_patente
+
+# =============================================================================
+# BLOQUE PRINCIPAL: Procesamiento de Lote y Guardado
+# =============================================================================
+
+lista_patentes = [] # Esta es la estructura que usarás en el Apartado B
+
+print("Iniciando segmentación con lógica V13...")
+
+for i in range(1, 13):
+    nombre_archivo = f'img{i:02d}.png'
+    
+    # Llamada a la función. Poner visualizar=True si quieres ver una por una.
+    recorte = obtener_recorte_v13(nombre_archivo, visualizar=False)
+    
+    if recorte is not None:
+        print(f"[OK] {nombre_archivo}: Guardada.")
+        # Guardamos un diccionario con nombre y la imagen (array)
+        lista_patentes.append({
+            "nombre": nombre_archivo,
+            "imagen": recorte
+        })
+    else:
+        print(f"[X]  {nombre_archivo}: No se detectó patente.")
+
+print(f"\nProcesamiento completo. {len(lista_patentes)}")
+
+# Visualización rápida de lo que guardaste en la lista
+if len(lista_patentes) > 0:
+    cols = 4
+    rows = (len(lista_patentes) // cols) + 1
+    plt.figure(figsize=(15, rows * 3))
+    
+    for idx, item in enumerate(lista_patentes):
+        plt.subplot(rows, cols, idx + 1)
+        plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
+        plt.title(item['nombre'])
+        plt.axis('off')
+    
+    plt.tight_layout()
+    plt.show()
 
 
-# ------------------------------------------------------------------
-# FUNCIÓN B: SEGMENTACIÓN DE CARACTERES (PUNTO B)
-# Usa umbralado, morfología y descriptores geométricos.
-# ------------------------------------------------------------------
-def segmentar_caracteres(placa_roi, mostrar=True, titulo=""):
-    """
-    Segmenta caracteres de la placa usando:
-    - Ecualización / filtro
-    - Top-hat (resalta caracteres claros sobre fondo oscuro)
-    - Umbralado de Otsu
-    - Apertura + clausura morfológica
-    - Eliminación de objetos que tocan el borde
-    - Componentes conectados + filtrado por área y aspecto
-    """
-    # --- 1) Paso a grises y mejora de contraste -------------------------
-    gray = cv2.cvtColor(placa_roi, cv2.COLOR_BGR2GRAY)
-    gray_eq = cv2.equalizeHist(gray)
-    gray_fil = cv2.medianBlur(gray_eq, 3)
+plt.figure(figsize=(15, 10))
+cols = 4
+rows = (len(lista_patentes) // cols) + 1
 
-    # --- 2) Top-hat morfológico (resalta letras blancas sobre fondo negro)
-    h, w = gray_fil.shape
-    k = max(9, (h // 3) | 1)   # tamaño impar ~ altura de caracteres
-    se_th = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    th_img = cv2.morphologyEx(gray_fil, cv2.MORPH_TOPHAT, se_th)
+for i, item in enumerate(lista_patentes):
+    # Accedemos a la IMAGEN dentro del diccionario
+    imagen_bgr = item['imagen'] 
+    
+    # Convertimos a RGB para que matplotlib muestre los colores bien
+    imagen_rgb = cv2.cvtColor(imagen_bgr, cv2.COLOR_BGR2RGB)
+    
+    plt.subplot(rows, cols, i + 1)
+    plt.imshow(imagen_rgb)
+    plt.title(item['nombre'])
+    plt.axis('off')
 
-    # --- 3) Umbralado (Otsu) + invertido: caracteres en blanco ---------
-    _, bw = cv2.threshold(th_img, 0, 255,
-                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    bw = 255 - bw
-
-    # --- 4) Limpieza morfológica (abertura + clausura) -----------------
-    se_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, se_small)
-    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, se_small)
-
-    # --- 5) Elimino objetos que tocan el borde (marco de la patente) ----
-    bw_cb = clear_border(bw)
-
-    # --- 6) Componentes conectados -------------------------------------
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        bw_cb, connectivity=8
-    )
-
-    chars = []
-    boxes = []
-
-    area_img = h * w
-    for i in range(1, num_labels):   # label 0 = fondo
-        x, y, wc, hc, area = stats[i]
-
-        # Filtros heurísticos para quedarnos con caracteres
-        if area < 0.01 * area_img:
-            continue                 # demasiado chico, ruido
-        if hc < 0.4 * h or hc > 0.95 * h:
-            continue                 # muy bajo o muy alto
-        aspect = wc / float(hc)
-        if aspect < 0.25 or aspect > 0.9:
-            continue                 # muy finito o muy ancho
-
-        char = bw_cb[y:y+hc, x:x+wc]
-        boxes.append((x, y, wc, hc))
-        chars.append(char)
-
-    # Ordeno de izquierda a derecha
-    boxes_chars = sorted(zip(boxes, chars), key=lambda p: p[0][0])
-    chars = [c for (_, c) in boxes_chars]
-
-    # --- 7) Visualización opcional -------------------------------------
-    if mostrar:
-        cols = max(3, len(chars) + 2)
-        plt.figure(figsize=(3 * cols, 4))
-
-        ax1 = plt.subplot(1, cols, 1)
-        plt.imshow(cv2.cvtColor(placa_roi, cv2.COLOR_BGR2RGB))
-        plt.title("ROI Patente")
-        plt.axis("off")
-
-        plt.subplot(1, cols, 2, sharey=ax1)
-        plt.imshow(bw_cb, cmap='gray')
-        plt.title("Binaria (inv) limpia")
-        plt.axis("off")
-
-        for i, ch in enumerate(chars):
-            plt.subplot(1, cols, 3 + i)
-            plt.imshow(ch, cmap='gray')
-            plt.title(f"Char {i+1}")
-            plt.axis("off")
-
-        plt.suptitle(f"Segmentación de caracteres {titulo}")
-        plt.tight_layout()
-        plt.show()
-
-    return chars
-
-
-
-
-# ------------------------------------------------------------------
-# PROCESAMIENTO DE LAS 12 IMÁGENES
-# ------------------------------------------------------------------
-if __name__ == "__main__":
-    for i in range(1, 13):
-        imagen = f'img{i:02d}.png'
-        print(f"\n======================")
-        print(f"Procesando {imagen}")
-        print(f"======================")
-
-        patentes = segmentar_patente_robusta(imagen, mostrar=True)
-
-        if not patentes:
-            print(f"No se detectó ninguna patente en {imagen}")
-            continue
-
-        for idx, placa_roi in enumerate(patentes):
-            titulo = f"{imagen} - Patente {idx+1}"
-            caracteres = segmentar_caracteres(placa_roi, mostrar=True, titulo=titulo)
-            print(f"{titulo}: {len(caracteres)} caracteres detectados")
-#
+plt.tight_layout()
+plt.show()
