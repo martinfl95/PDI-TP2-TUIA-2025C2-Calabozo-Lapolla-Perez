@@ -3,26 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-def imreconstruct(marker, mask, kernel=None):
-    if kernel is None:
-        kernel = np.ones((3,3), np.uint8)
-    while True:
-        expanded = cv2.dilate(marker, kernel)
-        expanded_intersection = cv2.bitwise_and(src1=expanded, src2=mask)
-        if (marker == expanded_intersection).all():
-            break
-        marker = expanded_intersection
-    return expanded_intersection
-
-def imfillhole(img):
-    mask = np.zeros_like(img)
-    h, w = img.shape
-    mask = cv2.copyMakeBorder(mask[1:-1,1:-1], 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=int(255))
-    marker = cv2.bitwise_not(img, mask=mask)
-    img_c = cv2.bitwise_not(img)
-    img_r = imreconstruct(marker=marker, mask=img_c)
-    img_fh = cv2.bitwise_not(img_r)
-    return img_fh
 
 def validar_con_canny(roi_color):
     """
@@ -52,17 +32,13 @@ def validar_con_canny(roi_color):
 def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     """
     Localiza y recorta la placa patente.
-    
-    Parámetros:
-        ruta_imagen (str): Ruta del archivo.
-        mostrar_pasos (bool): Si es True, muestra una figura con las 6 etapas del procesamiento.
     """
     imagen = cv2.imread(ruta_imagen)
     if imagen is None: return None
     
     alto_img, ancho_img = imagen.shape[:2]
 
-    # ROI
+    #ROI
     p_arriba, p_abajo, p_costado = 0.25, 0.05, 0.20
     y_ini = int(alto_img * p_arriba)
     y_fin = int(alto_img * (1 - p_abajo))
@@ -71,27 +47,27 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     roi = imagen[y_ini:y_fin, x_ini:x_fin]
     if roi.size == 0: return None
 
-    # Preprocesamiento
+    #Preprocesamiento
     gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     gris_eq = clahe.apply(gris)
     desenfoque = cv2.GaussianBlur(gris_eq, (5, 5), 0)
 
-    # Bordes (Sobel)
+    #Bordes (Sobel)
     sobelx = cv2.Sobel(desenfoque, cv2.CV_64F, 1, 0, ksize=3)
     sobelx_abs = cv2.convertScaleAbs(sobelx)
     
-    # Umbralado (Otsu)
+    #Umbralado (Otsu)
     _, umbralizada = cv2.threshold(sobelx_abs, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Morfología
+    #Morfología
     kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
     limpia = cv2.morphologyEx(umbralizada, cv2.MORPH_OPEN, kernel_vertical)
     
     kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 3))
     morfologia = cv2.morphologyEx(limpia, cv2.MORPH_CLOSE, kernel_horizontal)
 
-    # Análisis de contornos
+    #Análisis de contornos
     contornos, _ = cv2.findContours(morfologia, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     candidatos = []
     area_roi = roi.shape[0] * roi.shape[1]
@@ -145,7 +121,7 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
                                (rectangulo[1][0], rectangulo[1][1]), rectangulo[2])
                 candidatos.append((rect_global, relacion_aspecto))
 
-    # Selección
+    #Selección
     mejor_candidato = None
     mejor_puntaje = float('inf')
     
@@ -159,7 +135,7 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
             mejor_puntaje = diferencia
             mejor_candidato = cand_estructura
 
-    # Extración
+    #Extracción
     roi_patente = None
     if mejor_candidato:
         caja_final = np.int32(cv2.boxPoints(mejor_candidato))
@@ -208,95 +184,123 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     return roi_patente
 
 
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
-import os
+def filtrar_por_agrupacion(candidatos_info):
+    if not candidatos_info:
+        return []
 
-# =============================================================================
-# --- FUNCIÓN DE SEGMENTACIÓN DEFINITIVA ---
-# =============================================================================
-def segmentar_caracteres(roi_color, visualizar=False):
-    """
-    Segmenta caracteres de una patente utilizando CLAHE y Morfología Vertical.
-    Retorna:
-        - caracteres_finales: Lista de imágenes (recortes) de cada letra.
-        - mask_full_size: Máscara binaria del tamaño de roi_color (para debug).
-    """
-    if roi_color is None or roi_color.size == 0: 
+    #Ordenar por posición
+    candidatos_ordenados = sorted(candidatos_info, key=lambda c: c['x'])
+    
+    #Medianas de la altura y ancho
+    alturas = [c['h'] for c in candidatos_ordenados]
+    y_coords = [c['y'] for c in candidatos_ordenados]
+    
+    if not alturas: return []
+    
+    mediana_h = np.median(alturas)
+    mediana_y = np.median(y_coords)
+    
+    # Tolerancias de alto y ancho
+    tol_h = 0.15  
+    tol_y = 0.60 
+
+    aprobados = []
+
+    for c in candidatos_ordenados:
+        # Altura consistente
+        if abs(c['h'] - mediana_h) > (mediana_h * tol_h):
+            continue 
+            
+        # Alineación vertical
+        if abs(c['y'] - mediana_y) > (mediana_h * tol_y):
+            continue 
+
+        aprobados.append(c)
+
+
+    return aprobados
+
+def segmentar_caracteres(region_interes_color, visualizar=False):
+    if region_interes_color is None or region_interes_color.size == 0: 
         return [], np.zeros((10,10), dtype=np.uint8)
 
-    h, w = roi_color.shape[:2]
+    alto_total, ancho_total = region_interes_color.shape[:2]
     
-    # 1. RECORTE DE SEGURIDAD (Eliminar marcos)
-    # Ajusta estos porcentajes si tus patentes están muy pegadas al borde
-    my_top, my_bot = int(h * 0.10), int(h * 0.98)
-    mx_left, mx_right = int(w * 0.02), int(w * 0.98)
-    roi = roi_color[my_top:my_bot, mx_left:mx_right]
+    #Recorte de margenes
+    margen_sup, margen_inf = int(alto_total * 0.10), int(alto_total * 0.98)
+    margen_izq, margen_der = int(ancho_total * 0.02), int(ancho_total * 0.98)
     
-    # 2. PREPROCESAMIENTO (CLAHE + Bilateral)
-    gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    region_interes = region_interes_color[margen_sup:margen_inf, margen_izq:margen_der]
     
-    # CLAHE: Ecualización local para combatir sombras (Vital para tu caso)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gris = clahe.apply(gris)
+    #Preprocesamiento
+    imagen_gris = cv2.cvtColor(region_interes, cv2.COLOR_BGR2GRAY)
     
-    # Bilateral: Reduce ruido manteniendo bordes
-    gris = cv2.bilateralFilter(gris, 11, 17, 17)
+    #Suavizado y reducción de ruido
+    imagen_gris = cv2.bilateralFilter(imagen_gris, 11, 17, 17)
     
-    # 3. BINARIZACIÓN
-    binaria = cv2.adaptiveThreshold(gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                    cv2.THRESH_BINARY_INV, 13, 5)
+    #Binarización adaptativo
+    imagen_binaria = cv2.adaptiveThreshold(imagen_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                           cv2.THRESH_BINARY_INV, 13, 5)
 
-    contornos, _ = cv2.findContours(binaria, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    #Extracción de Contornos
+    contornos, _ = cv2.findContours(imagen_binaria, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     
-    mask_roi = np.zeros_like(gris, dtype=np.uint8)
-    h_roi, w_roi = binaria.shape
-    candidatos = []
+    candidatos_previos = []
+    alto_roi, ancho_roi = imagen_binaria.shape
 
-    for cnt in contornos:
-        x, y, w_c, h_c = cv2.boundingRect(cnt)
-        area = cv2.contourArea(cnt)
-        ratio = w_c / float(h_c)
-        if area < 30: continue               
-        if h_c < 0.25 * h_roi: continue       
-        if ratio < 0.15: continue          
-        if ratio > 1.5: continue             
-        cv2.drawContours(mask_roi, [cnt], -1, 255, thickness=cv2.FILLED)
+    for contorno in contornos:
+        #Obtener las estadísticas del contorno
+        pos_x, pos_y, ancho_cont, alto_cont = cv2.boundingRect(contorno)
+        area_contorno = cv2.contourArea(contorno)
+        proporcion = ancho_cont / float(alto_cont)
+
+        #Filtros Geométricos
+        if area_contorno < 30: continue
+        if alto_cont < 0.20 * alto_roi: continue 
+        if proporcion < 0.10 or proporcion > 2: continue
+
+        #Guardamos la información geométrica y el contorno
+        candidatos_previos.append({
+            'cnt': contorno,
+            'x': pos_x, 'y': pos_y, 'w': ancho_cont, 'h': alto_cont,
+            'area': area_contorno
+        })
+    #Filtro por agrupación
+    candidatos_finales_info = filtrar_por_agrupacion(candidatos_previos)
+    
+    mascara_roi = np.zeros_like(imagen_gris, dtype=np.uint8)
+    lista_recortes = []
+
+    for candidato in candidatos_finales_info:
+        #Dibujar contorno en la máscara
+        cv2.drawContours(mascara_roi, [candidato['cnt']], -1, 255, thickness=cv2.FILLED)
         
-        candidatos.append((x, roi[y:y+h_c, x:x+w_c]))
-
-    mask_full_size = np.zeros((h, w), dtype=np.uint8)
-    mask_full_size[my_top:my_bot, mx_left:mx_right] = mask_roi
-
-    # 7. ORDENAR Y RETORNAR
-    candidatos.sort(key=lambda c: c[0])
-    caracteres_finales = [c[1] for c in candidatos]
-
+        #Extraer coordenadas y recortar de la ROI original
+        x, y, w_c, h_c = candidato['x'], candidato['y'], candidato['w'], candidato['h']
+        lista_recortes.append(region_interes[y:y+h_c, x:x+w_c])
+        
+    # Reconstruir la máscara al tamaño de la imagen de entrada
+    mascara_tamaño_completo = np.zeros((alto_total, ancho_total), dtype=np.uint8)
+    mascara_tamaño_completo[margen_sup:margen_inf, margen_izq:margen_der] = mascara_roi
+    
     if visualizar:
         plt.figure(figsize=(10, 3))
-        plt.subplot(1, 3, 1); plt.imshow(gris, cmap='gray'); plt.title("1. Gris (CLAHE)")
-        plt.subplot(1, 3, 2); plt.imshow(binaria, cmap='gray'); plt.title("2. Binaria (Vertical)")
-        plt.subplot(1, 3, 3); plt.imshow(mask_roi, cmap='gray'); plt.title("3. Máscara Final")
+        plt.subplot(1, 3, 1); plt.imshow(imagen_gris, cmap='gray'); plt.title("1. Imagen Gris")
+        plt.subplot(1, 3, 2); plt.imshow(imagen_binaria, cmap='gray'); plt.title("2. Imagen Binaria")
+        plt.subplot(1, 3, 3); plt.imshow(mascara_roi, cmap='gray'); plt.title(f"3. Máscara Filtrada ({len(lista_recortes)})")
         plt.show()
 
-    return caracteres_finales, mask_full_size
+    return lista_recortes, mascara_tamaño_completo
 
-# =============================================================================
-# --- MAIN PARA DEBUGEAR ---
-# =============================================================================
 if __name__ == '__main__':
-    # Configuración de Matplotlib
+    # Configuración de Matplotlib para todos los plots
     plt.rcParams['figure.figsize'] = [14, 8]
     
-    # Aquí simulamos tu lista de archivos. 
-    # Asegúrate de que 'obtener_recorte' esté disponible o carga las imágenes directamente.
+
     lista_resultados = []
-    
-    print(">>> Iniciando Debugging Visual...")
 
     for i in range(1, 13):
-        nombre_archivo = f'img{i:02d}.png' # Ojo con la ruta
+        nombre_archivo = f'img{i:02d}.png'
         
         recorte_patente = obtener_recorte(nombre_archivo, mostrar_pasos=False)
         if recorte_patente is not None:
@@ -337,7 +341,6 @@ if __name__ == '__main__':
             plt.axis('off')
             if idx == 0: plt.title("Mascara Aplicada")
             
-            # Cols 3-9: Caracteres recortados
             chars = item['chars']
             for j in range(min(len(chars), 7)):
                 plt.subplot(n_filas, n_cols, base + 3 + j)
