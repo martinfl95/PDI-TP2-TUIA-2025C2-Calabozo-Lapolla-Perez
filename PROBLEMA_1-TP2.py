@@ -251,7 +251,7 @@ def clasificar_monedas(elipses_monedas: list, imagen: str = 'monedas.jpg', grafi
         
     return resultados
 
-def clasificacion_dados_factor_forma(dados_detectados: list, imagen: str ='monedas.jpg', graficar: bool = True):
+def clasificar_dados(dados_detectados: list, imagen: str ='monedas.jpg', graficar: bool = True):
     
     img = cv2.imread(imagen) 
     if img is None: 
@@ -382,7 +382,13 @@ if __name__ == '__main__':
     
     graficar_clasificacion_monedas (True | False): desarrollo de la etapa de clasificación
     
-    graficar_dados (True | False): desarrollo de la etapa de clasificación de dados
+    graficar_clasificacion_dados (True | False): desarrollo de la etapa de clasificación de dados
+    
+    histograma_factor_forma (True | False): Histograma de umbral de decisión de dados y monedas
+    
+    histograma_areas (True | False): Histograma de umbral de decisión de tipos de monedas
+    
+    En la terminal, luego de la ejecución, habrá resúmenes sobre los valores calculados y encontrados en cada etapa
     '''
     #Etapa 1: Preprocesamiento - filtro mediana sobre imagen original para suavizar bordes
     #Etapa 2: Morfología - Tratamiento de imagen para segmentar contornos
@@ -390,13 +396,50 @@ if __name__ == '__main__':
     #Etapa 4: Normalización de contornos - Encontramos una elipse de minimo tamaño que regularice los contornos encontrados
     #Etapa 5: Clasificación Monedas - Utilizando el area de cada moneda diferenciamos los tipos
     #Etapa 6: Clasificacion Dados - Utilizando contornos internos y factor de forma encontramos el valor de la cara
-    etapas = [1,2,3]
-    graficar_monedas = True
-    graficar_clasificacion_monedas = True
+    etapas = []
+    graficar_monedas = False
+    graficar_clasificacion_monedas = False
+    graficar_clasificacion_dados = True
+    histograma_factor_forma = False
+    histograma_areas = False
     contornos_monedas, contornos_dados = segmentacion_contornos('monedas.jpg', etapas = etapas)
     if contornos_monedas:
         contornos_monedas_normalizados = normalizar_contornos(contornos_monedas, 'monedas.jpg', graficar_monedas)
     if contornos_monedas_normalizados:
         resultados_monedas = clasificar_monedas(contornos_monedas_normalizados, 'monedas.jpg', graficar_clasificacion_monedas)
     if contornos_dados:
-        resultados_dados = clasificacion_dados_factor_forma(contornos_dados, 'monedas.jpg', True)
+        resultados_dados = clasificar_dados(contornos_dados, 'monedas.jpg', graficar_clasificacion_dados)
+        
+    if histograma_factor_forma:
+        valores_monedas = [obj['metrica'] for obj in contornos_monedas]
+        valores_dados = [obj['metrica'] for obj in contornos_dados]
+
+        plt.figure(figsize=(10, 6))
+        
+        plt.hist(valores_monedas, bins=10, alpha=0.7, label='Monedas', color='skyblue', edgecolor='black')
+        plt.hist(valores_dados, bins=10, alpha=0.7, label='Dados', color='salmon', edgecolor='black')
+        if valores_monedas and valores_dados:
+            umbral_sugerido = (max(valores_monedas) + min(valores_dados)) / 2
+            plt.axvline(umbral_sugerido, color='red', linestyle='dashed', linewidth=2, label=f'Umbral (~{umbral_sugerido:.2f})')
+
+        plt.xlabel('Factor de Forma Inverso ($P^2/A$)', fontsize=12)
+        plt.ylabel('Frecuencia', fontsize=12)
+        plt.title('Distribución del Factor de Forma: Separabilidad de Clases', fontsize=14)
+        plt.legend()
+        plt.grid(axis='y', alpha=0.3)
+        plt.show()
+        
+    if histograma_areas:
+        areas = [m['area'] for m in resultados_monedas]
+        corte_10_c = 74000
+        corte_50_c = 94000
+        plt.figure(figsize=(10, 6))
+        plt.hist(areas, bins=15, color='gray', edgecolor='black', alpha=0.7, label='Distribución de Áreas')
+        plt.axvline(corte_10_c, color='red', linestyle='--', linewidth=2, label=f'Corte 10c ({corte_10_c})')
+        plt.axvline(corte_50_c, color='blue', linestyle='--', linewidth=2, label=f'Corte 50c ({corte_50_c})')
+        plt.xlabel('Área (píxeles cuadrados)', fontsize=12)
+        plt.ylabel('Frecuencia (Cantidad de monedas)', fontsize=12)
+        plt.title('Histograma de Áreas y Umbrales de Clasificación', fontsize=14)
+        plt.legend()
+        plt.grid(axis='y', alpha=0.3)
+        plt.show()
