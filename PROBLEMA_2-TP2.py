@@ -186,31 +186,181 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
 
 
 
+#if __name__ == '__main__':
+    #lista_patentes = []
+
+    #for i in range(1, 13):
+        #nombre_archivo = f'img{i:02d}.png'
+        
+        # recorte limpio de la patente
+        #recorte = obtener_recorte(nombre_archivo, mostrar_pasos=True) 
+        
+        #if recorte is not None:
+            #lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
+        #else:
+            #print(f"[{nombre_archivo}] No detectada.")
+
+    # Visualización de las patentes juntas
+    #if lista_patentes:
+        #cols = 4
+        #filas = (len(lista_patentes) // cols) + 1
+        #plt.figure(figsize=(15, filas * 3))
+        
+        #for idx, item in enumerate(lista_patentes):
+            #plt.subplot(filas, cols, idx + 1)
+            #plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
+            #plt.title(item['nombre'])
+            #plt.axis('off')
+            
+        #plt.tight_layout()
+        #plt.show()
+
+
+# =============================================================================
+# --- PARTE B: Solución Definitiva (Black-Hat + Engrosamiento Gris) -----------
+# =============================================================================
+
+def segmentar_caracteres(roi_color, nombre_debug="", visualizar=False):
+    if roi_color is None or roi_color.size == 0:
+        return []
+
+    # --- 1. PREPROCESAMIENTO ---
+    # Recorte para eliminar marcos (12% Y, 4% X)
+    h, w = roi_color.shape[:2]
+    my = int(h * 0.12)
+    mx = int(w * 0.04)
+    roi = roi_color[my:h-my, mx:w-mx]
+    if roi.size == 0: return []
+
+    # Escala de grises
+    gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    # --- 2. REALCE DE DETALLES (Black-Hat) ---
+    # Extrae las letras oscuras del fondo claro/sombreado.
+    kernel_bh = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 10))
+    blackhat = cv2.morphologyEx(gris, cv2.MORPH_BLACKHAT, kernel_bh)
+    
+    # Aumentar contraste del resultado (normalizar 0-255)
+    blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+
+    # --- 3. ENGROSAMIENTO EN GRISES (La clave) ---
+    # Dilatamos la imagen GRIS. Esto hace que las partes brillantes (letras)
+    # se expandan suavemente hacia afuera, conectando trazos rotos.
+    # Es mucho más suave que dilatar una imagen binaria.
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    blackhat_dilatada = cv2.dilate(blackhat, kernel_dilate, iterations=1)
+
+    # --- 4. BINARIZACIÓN ---
+    # Ahora Otsu encuentra un umbral perfecto porque las letras son sólidas.
+    # Usamos THRESH_BINARY porque en Black-Hat las letras son blancas.
+    _, binaria = cv2.threshold(blackhat_dilatada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Limpieza de bordes (marco negro de 2px)
+    h_r, w_r = binaria.shape
+    cv2.rectangle(binaria, (0,0), (w_r, h_r), 0, 2)
+
+    # --- 5. ANÁLISIS DE CONTORNOS ---
+    contornos, _ = cv2.findContours(binaria, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    candidatos = []
+    area_total = h_r * w_r
+    
+    if visualizar: img_debug = roi.copy()
+
+    for cnt in contornos:
+        x, y, w_c, h_c = cv2.boundingRect(cnt)
+        area = cv2.contourArea(cnt)
+        
+        # --- FILTROS GEOMÉTRICOS ---
+        
+        # A. Altura: Mínimo 35% de la altura total.
+        if h_c < 0.35 * h_r: continue
+        
+        # B. Área: Mínimo 1.5% del área total.
+        if area < 0.015 * area_total: continue
+
+        # C. Relación de Aspecto (Ancho/Alto)
+        ratio = w_c / float(h_c)
+        
+        if ratio > 6.0: continue # Ruido horizontal muy fino
+
+        # LÓGICA DE SEPARACIÓN MEJORADA
+        # Si es muy ancho (> 0.85 ratio), cortamos.
+        if ratio > 0.85:
+            # Estimación de cuántas letras hay
+            # Asumimos una letra tiene ratio ~0.45
+            n_cortes = max(2, int(round(ratio / 0.45)))
+            ancho_corte = w_c // n_cortes
+            
+            for k in range(n_cortes):
+                nx = x + k*ancho_corte
+                # Asegurar que no nos pasamos del ancho original
+                nw = min(ancho_corte, (x + w_c) - nx)
+                
+                candidatos.append((nx, roi[y:y+h_c, nx:nx+nw]))
+                if visualizar: cv2.rectangle(img_debug, (nx, y), (nx+nw, y+h_c), (0, 255, 255), 2)
+        else:
+            # Caracter único
+            candidatos.append((x, roi[y:y+h_c, x:x+w_c]))
+            if visualizar: cv2.rectangle(img_debug, (x, y), (x+w_c, y+h_c), (0, 255, 0), 2)
+
+    # Ordenar
+    candidatos.sort(key=lambda c: c[0])
+    caracteres_finales = [c[1] for c in candidatos]
+
+    # --- DEBUG ---
+    if visualizar:
+        plt.figure(figsize=(10, 3))
+        plt.suptitle(f"Proceso: {nombre_debug}")
+        plt.subplot(1, 4, 1); plt.imshow(gris, cmap='gray'); plt.title("1. Gris")
+        plt.subplot(1, 4, 2); plt.imshow(blackhat, cmap='gray'); plt.title("2. Black-Hat")
+        plt.subplot(1, 4, 3); plt.imshow(binaria, cmap='gray'); plt.title("3. Binaria")
+        plt.subplot(1, 4, 4); plt.imshow(cv2.cvtColor(img_debug, cv2.COLOR_BGR2RGB)); plt.title(f"4. Final ({len(caracteres_finales)})")
+        plt.show()
+
+    return caracteres_finales
+
+# =============================================================================
+# --- MAIN ---
+# =============================================================================
 if __name__ == '__main__':
+    plt.rcParams['figure.figsize'] = [12, 6]
     lista_patentes = []
+
+    print("Iniciando procesamiento...")
 
     for i in range(1, 13):
         nombre_archivo = f'img{i:02d}.png'
         
-        # recorte limpio de la patente
-        recorte = obtener_recorte(nombre_archivo, mostrar_pasos=True) 
+        recorte_patente = obtener_recorte_sin_padding(nombre_archivo, visualizar=False) 
         
-        if recorte is not None:
-            lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
-        else:
-            print(f"[{nombre_archivo}] No detectada.")
-
-    # Visualización de las patentes juntas
-    if lista_patentes:
-        cols = 4
-        filas = (len(lista_patentes) // cols) + 1
-        plt.figure(figsize=(15, filas * 3))
-        
-        for idx, item in enumerate(lista_patentes):
-            plt.subplot(filas, cols, idx + 1)
-            plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
-            plt.title(item['nombre'])
-            plt.axis('off')
+        if recorte_patente is not None:
+            print(f"-> Analizando {nombre_archivo}...")
+            # Visualizar=True para confirmar
+            caracteres = segmentar_caracteres(recorte_patente, nombre_debug=nombre_archivo, visualizar=True)
             
-        plt.tight_layout()
+            lista_patentes.append({
+                "nombre": nombre_archivo, 
+                "imagen_patente": recorte_patente,
+                "caracteres": caracteres
+            })
+        else:
+            print(f"[{nombre_archivo}] FALLO en Parte A.")
+
+    if lista_patentes:
+        filas = len(lista_patentes)
+        plt.figure(figsize=(12, filas * 1.5))
+        plt.suptitle("RESULTADOS FINALES", fontsize=16)
+        
+        for i, item in enumerate(lista_patentes):
+            plt.subplot(filas, 8, i * 8 + 1)
+            plt.imshow(cv2.cvtColor(item['imagen_patente'], cv2.COLOR_BGR2RGB))
+            plt.ylabel(item['nombre'], rotation=0, labelpad=40, va='center', fontsize=9)
+            plt.xticks([]); plt.yticks([])
+            
+            chars = item['caracteres']
+            for j in range(min(len(chars), 7)): 
+                plt.subplot(filas, 8, i * 8 + 2 + j)
+                plt.imshow(cv2.cvtColor(chars[j], cv2.COLOR_BGR2RGB))
+                plt.axis('off')
         plt.show()
