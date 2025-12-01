@@ -4,19 +4,11 @@ import matplotlib.pyplot as plt
 
 def validar_con_canny(roi_color):
     """
-    Utiliza el detector de bordes Canny para verificar si el recorte candidato
-    posee la textura interna (bordes verticales de letras/números) típica de una patente.
-    Ayuda a descartar falsos positivos lisos como ópticas o espejos.
+    Utiliza Canny para verificar textura vertical (letras) y descartar objetos lisos.
     """
-    # 1. Convertir recorte a escala de grises
     gris = cv2.cvtColor(roi_color, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Aplicar Canny para detectar bordes fuertes
-    # Los umbrales 50-150 son estándar para detectar trazos definidos
     bordes = cv2.Canny(gris, 50, 150)
     
-    # 3. Escanear 3 líneas horizontales a distintas alturas (25%, 50%, 75%)
-    # Esto se hace para asegurar que cruzamos las letras en algún punto
     alto, ancho = bordes.shape
     alturas = [int(alto * 0.25), int(alto * 0.5), int(alto * 0.75)]
     
@@ -25,103 +17,73 @@ def validar_con_canny(roi_color):
     
     for y in alturas:
         fila = bordes[y, :]
-        # Contamos píxeles blancos (bordes verticales interceptados)
         cortes = np.count_nonzero(fila)
-        
-        # Una línea de patente válida debe cruzar varias letras.
-        # 6 caracteres * 2 bordes = 12 bordes mínimo aprox. Damos margen > 5.
         if cortes > 5: 
             total_cortes += cortes
             lineas_validas += 1
             
-    # Si ninguna línea encontró bordes, no es patente
     if lineas_validas == 0: return False
-    
     promedio = total_cortes / lineas_validas
+    return 10 <= promedio <= 35
 
-    # RANGO DE ACEPTACIÓN:
-    # - Menos de 10: Probablemente un objeto liso o logo simple.
-    # - Más de 30: Probablemente ruido, pasto o parrilla muy densa.
-    # - Entre 10 y 30: Rango típico de texto de patente.
-    return 10 <= promedio <= 30
-
-def obtener_recorte_sin_padding(ruta_imagen, visualizar=False):
+def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     """
-    Localiza y recorta la placa patente utilizando morfología matemática y análisis de contornos.
+    Localiza y recorta la placa patente.
+    
+    Parámetros:
+        ruta_imagen (str): Ruta del archivo.
+        mostrar_pasos (bool): Si es True, muestra una figura con las 6 etapas del procesamiento.
     """
-    # --- CARGA Y RECORTE INICIAL (ROI) ---
     imagen = cv2.imread(ruta_imagen)
     if imagen is None: return None
+    
     alto_img, ancho_img = imagen.shape[:2]
 
-    # Definimos porcentajes para ignorar bordes irrelevantes (cielo, piso, costados extremos)
+    # ROI
     p_arriba, p_abajo, p_costado = 0.25, 0.05, 0.20
     y_ini = int(alto_img * p_arriba)
     y_fin = int(alto_img * (1 - p_abajo))
     x_ini = int(ancho_img * p_costado)
     x_fin = int(ancho_img * (1 - p_costado))
-    
-    # Extraemos la Región de Interés (ROI) general
     roi = imagen[y_ini:y_fin, x_ini:x_fin]
     if roi.size == 0: return None
 
-    # --- PREPROCESAMIENTO ---
-    # 1. Escala de grises
+    # Preprocesamiento
     gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    
-    # 2. Mejora de contraste local (CLAHE) para resaltar letras en sombras
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gris = clahe.apply(gris)
-    
-    # 3. Suavizado Gaussiano para reducir ruido antes de detectar bordes
-    desenfoque = cv2.GaussianBlur(gris, (5, 5), 0)
+    gris_eq = clahe.apply(gris)
+    desenfoque = cv2.GaussianBlur(gris_eq, (5, 5), 0)
 
-    # 4. Detección de bordes verticales (Sobel X)
-    # Las patentes tienen alto contraste vertical (letras vs fondo)
+    # Bordes (Sobel)
     sobelx = cv2.Sobel(desenfoque, cv2.CV_64F, 1, 0, ksize=3)
-    sobelx = cv2.convertScaleAbs(sobelx)
+    sobelx_abs = cv2.convertScaleAbs(sobelx)
     
-    # 5. Binarización (Otsu) para separar bordes del fondo
-    _, umbralizada = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Umbralado (Otsu)
+    _, umbralizada = cv2.threshold(sobelx_abs, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # --- MORFOLOGÍA ---
-    # 1. Limpieza vertical: Eliminar ruido pequeño (líneas finas horizontales)
+    # Morfología
     kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5))
     limpia = cv2.morphologyEx(umbralizada, cv2.MORPH_OPEN, kernel_vertical)
     
-    # 2. Fusión horizontal: Conectar las letras para formar un solo bloque rectangular
-    # El kernel (13, 3) es clave: ancho para unir letras, bajo para no unir con parrillas
     kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 3))
     morfologia = cv2.morphologyEx(limpia, cv2.MORPH_CLOSE, kernel_horizontal)
 
-    # --- ANÁLISIS DE CONTORNOS ---
+    # Análisis de contornos
     contornos, _ = cv2.findContours(morfologia, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     candidatos = []
     area_roi = roi.shape[0] * roi.shape[1]
-
-    # Copia para visualización (solo si se pide)
-    if visualizar:
-        viz_img = imagen.copy()
-        cv2.rectangle(viz_img, (x_ini, y_ini), (x_fin, y_fin), (255, 0, 0), 2)
-
+    
     for cnt in contornos:
-        # 1. Filtro de Área Mínima: Descartar ruido pequeño
         area_blob = cv2.contourArea(cnt)
-        if area_blob < 500:
-            continue
+        if area_blob < 500: continue
 
-        # 2. Filtro de Proporción del Bounding Box recto
         bx, by, bw, bh = cv2.boundingRect(cnt)
         if bh == 0: continue
-        #Si es más alto que ancho (vertical), no es patente
-        if float(bw) / bh < 1.5:
-            continue 
+        if float(bw) / bh < 1.5: continue 
 
-        #Obtener el rectángulo rotado (ajustado a la orientación del objeto)
         rectangulo = cv2.minAreaRect(cnt)
         caja = np.int32(cv2.boxPoints(rectangulo))
         
-        #Calcular dimensiones reales (largo y corto) independientemente de la rotación
         d1 = np.linalg.norm(caja[0] - caja[1])
         d2 = np.linalg.norm(caja[1] - caja[2])
         
@@ -134,117 +96,124 @@ def obtener_recorte_sin_padding(ruta_imagen, visualizar=False):
             
         if lado_corto == 0: continue
         
-        #Filtros geometricos
-        
-        #Relación de Aspecto (Largo / Corto)
         relacion_aspecto = lado_largo / lado_corto
-        
-        #Área máxima relativa (no puede ocupar más del 20% de la imagen)
         area_rect = lado_largo * lado_corto
+        
         if area_rect > (area_roi * 0.2): continue 
+        if not (2.0 < relacion_aspecto < 4.5): continue 
         
-        #Rango de Aspect Ratio permitido (Patente vieja ~2.0, Nueva ~3.1)
-        if not (2.0 < relacion_aspecto < 4): continue 
-        
-        #Ángulo de inclinación (no aceptamos patentes muy torcidas > 45°)
         angulo_grados = abs(np.degrees(np.arctan2(vec[1], vec[0]))) % 180
         angulo_horiz = min(angulo_grados, abs(180 - angulo_grados))
         if angulo_horiz > 45: continue 
         
-        # Rectangularidad (Extent): Área real / Área del rectángulo envolvente
-        # Un valor bajo (< 0.49) indica que el objeto está muy "hueco" o irregular
         extension = area_blob / area_rect
         if extension < 0.40: continue
 
-        # --- VALIDACIONES FINALES ---
-        
-        # Intensidad media dentro de la máscara (evitar bloques negros o blancos puros)
         mascara = np.zeros_like(limpia)
         cv2.drawContours(mascara, [caja], 0, 255, -1)
         val_medio = cv2.mean(limpia, mask=mascara)[0] / 255.0
         
         if 0.15 < val_medio < 0.95:
-            # Validación de Textura con Canny
-            roi_candidato_bgr = cv2.cvtColor(gris[by:by+bh, bx:bx+bw], cv2.COLOR_GRAY2BGR)
-
+            # Recorte local para Canny
+            roi_candidato_bgr = roi[by:by+bh, bx:bx+bw] 
+            
             if validar_con_canny(roi_candidato_bgr):
-                # Si pasa todo, guardamos el candidato ajustando coordenadas globales
                 rect_global = ((rectangulo[0][0] + x_ini, rectangulo[0][1] + y_ini), 
                                (rectangulo[1][0], rectangulo[1][1]), rectangulo[2])
                 candidatos.append((rect_global, relacion_aspecto))
 
-    # Selección de candidatos
-    # Buscamos el candidato cuyo ratio se acerque más a los estándares (2.0 o 3.1)
+    # Selección
     mejor_candidato = None
-    mejor_puntaje = 1000 # Mientras menor sea, mejor
+    mejor_puntaje = float('inf')
     
     for cand in candidatos:
         cand_estructura, cand_ratio = cand
-        
-        diff_vieja = abs(cand_ratio - 2.0)  # Patente Vieja
-        diff_nueva = abs(cand_ratio - 3.1)  # Patente Mercosur
-
+        diff_vieja = abs(cand_ratio - 2.0)
+        diff_nueva = abs(cand_ratio - 3.1)
         diferencia = min(diff_vieja, diff_nueva)
+        
         if diferencia < mejor_puntaje:
             mejor_puntaje = diferencia
             mejor_candidato = cand_estructura
 
-    # Extracción
+    # Extración
     roi_patente = None
     if mejor_candidato:
         caja_final = np.int32(cv2.boxPoints(mejor_candidato))
         
-        if visualizar:
-            cv2.drawContours(viz_img, [caja_final], 0, (0, 255, 0), 3)
-
         x, y, w, h = cv2.boundingRect(caja_final)
-        # Aseguramos límites dentro de la imagen
         x, y = max(0, x), max(0, y)
         w, h = min(w, imagen.shape[1] - x), min(h, imagen.shape[0] - y)
         
         if w > 0 and h > 0:
             roi_patente = imagen[y:y+h, x:x+w]
 
-    # Visualización paso a paso (solo debug)
-    if visualizar:
-        plt.figure(figsize=(12, 5))
-        plt.subplot(1, 2, 1); plt.title("Detección en Imagen"); plt.imshow(cv2.cvtColor(viz_img, cv2.COLOR_BGR2RGB))
-        plt.subplot(1, 2, 2); plt.title("Recorte Final"); 
+    # Visualización de pasos
+    if mostrar_pasos:
+        plt.figure(figsize=(15, 8))
+        
+        plt.subplot(2, 3, 1); plt.imshow(gris_eq, cmap='gray'); plt.title("1. ROI + CLAHE")
+        plt.axis('off')
+        plt.subplot(2, 3, 2); plt.imshow(sobelx_abs, cmap='gray'); plt.title("2. Sobel Vertical")
+        plt.axis('off')
+        plt.subplot(2, 3, 3); plt.imshow(umbralizada, cmap='gray'); plt.title("3. Binarización (Otsu)")
+        plt.axis('off')
+        plt.subplot(2, 3, 4); plt.imshow(morfologia, cmap='gray'); plt.title("4. Morfología (Limpieza+Unión)")
+        plt.axis('off')
+        
+        plt.subplot(2, 3, 5)
+        viz_deteccion = imagen.copy()
+        if mejor_candidato:
+            box = np.int32(cv2.boxPoints(mejor_candidato))
+            cv2.drawContours(viz_deteccion, [box], 0, (0, 255, 0), 3)
+        plt.imshow(cv2.cvtColor(viz_deteccion, cv2.COLOR_BGR2RGB))
+        plt.title("5. Detección")
+        plt.axis('off')
+
+        plt.subplot(2, 3, 6)
         if roi_patente is not None:
             plt.imshow(cv2.cvtColor(roi_patente, cv2.COLOR_BGR2RGB))
+            plt.title("6. Recorte Final")
         else:
-            plt.text(0.5, 0.5, "No detectado", ha='center')
+            plt.text(0.5, 0.5, "NO DETECTADO", ha='center')
+            plt.title("6. Recorte Final")
+        plt.axis('off')
+
+        plt.tight_layout()
         plt.show()
 
     return roi_patente
 
+
+
 #if __name__ == '__main__':
-#    lista_patentes = []
-#
-#    for i in range(1, 13):
-#        nombre_archivo = f'img{i:02d}.png'
-#        recorte = obtener_recorte_sin_padding(nombre_archivo, visualizar=True) 
-#        
-#        if recorte is not None:
-#            lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
-#            print(f"[{nombre_archivo}] Detectada.")
-#        else:
-#            print(f"[{nombre_archivo}] No detectada.")
-#
-#    # Visualización
-#    if lista_patentes:
-#        cols = 4
-#        filas = (len(lista_patentes) // cols) + 1
-#        plt.figure(figsize=(15, filas * 3))
-#        
-#        for idx, item in enumerate(lista_patentes):
-#            plt.subplot(filas, cols, idx + 1)
-#            plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
-#            plt.title(item['nombre'])
-#            plt.axis('off')
-#            
-#        plt.tight_layout()
-#        plt.show()
+    #lista_patentes = []
+
+    #for i in range(1, 13):
+        #nombre_archivo = f'img{i:02d}.png'
+        
+        # recorte limpio de la patente
+        #recorte = obtener_recorte(nombre_archivo, mostrar_pasos=True) 
+        
+        #if recorte is not None:
+            #lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
+        #else:
+            #print(f"[{nombre_archivo}] No detectada.")
+
+    # Visualización de las patentes juntas
+    #if lista_patentes:
+        #cols = 4
+        #filas = (len(lista_patentes) // cols) + 1
+        #plt.figure(figsize=(15, filas * 3))
+        
+        #for idx, item in enumerate(lista_patentes):
+            #plt.subplot(filas, cols, idx + 1)
+            #plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
+            #plt.title(item['nombre'])
+            #plt.axis('off')
+            
+        #plt.tight_layout()
+        #plt.show()
 
 
 # =============================================================================
