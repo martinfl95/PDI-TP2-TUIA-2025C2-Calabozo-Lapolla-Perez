@@ -1,6 +1,28 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+
+def imreconstruct(marker, mask, kernel=None):
+    if kernel is None:
+        kernel = np.ones((3,3), np.uint8)
+    while True:
+        expanded = cv2.dilate(marker, kernel)
+        expanded_intersection = cv2.bitwise_and(src1=expanded, src2=mask)
+        if (marker == expanded_intersection).all():
+            break
+        marker = expanded_intersection
+    return expanded_intersection
+
+def imfillhole(img):
+    mask = np.zeros_like(img)
+    h, w = img.shape
+    mask = cv2.copyMakeBorder(mask[1:-1,1:-1], 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=int(255))
+    marker = cv2.bitwise_not(img, mask=mask)
+    img_c = cv2.bitwise_not(img)
+    img_r = imreconstruct(marker=marker, mask=img_c)
+    img_fh = cv2.bitwise_not(img_r)
+    return img_fh
 
 def validar_con_canny(roi_color):
     """
@@ -25,6 +47,7 @@ def validar_con_canny(roi_color):
     if lineas_validas == 0: return False
     promedio = total_cortes / lineas_validas
     return 10 <= promedio <= 35
+
 
 def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     """
@@ -185,202 +208,141 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     return roi_patente
 
 
-
-#if __name__ == '__main__':
-    #lista_patentes = []
-
-    #for i in range(1, 13):
-        #nombre_archivo = f'img{i:02d}.png'
-        
-        # recorte limpio de la patente
-        #recorte = obtener_recorte(nombre_archivo, mostrar_pasos=True) 
-        
-        #if recorte is not None:
-            #lista_patentes.append({"nombre": nombre_archivo, "imagen": recorte})
-        #else:
-            #print(f"[{nombre_archivo}] No detectada.")
-
-    # Visualización de las patentes juntas
-    #if lista_patentes:
-        #cols = 4
-        #filas = (len(lista_patentes) // cols) + 1
-        #plt.figure(figsize=(15, filas * 3))
-        
-        #for idx, item in enumerate(lista_patentes):
-            #plt.subplot(filas, cols, idx + 1)
-            #plt.imshow(cv2.cvtColor(item['imagen'], cv2.COLOR_BGR2RGB))
-            #plt.title(item['nombre'])
-            #plt.axis('off')
-            
-        #plt.tight_layout()
-        #plt.show()
-
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import os
 
 # =============================================================================
-# --- PARTE B: Solución Definitiva (Black-Hat + Engrosamiento Gris) -----------
+# --- FUNCIÓN DE SEGMENTACIÓN DEFINITIVA ---
 # =============================================================================
+def segmentar_caracteres(roi_color, visualizar=False):
+    """
+    Segmenta caracteres de una patente utilizando CLAHE y Morfología Vertical.
+    Retorna:
+        - caracteres_finales: Lista de imágenes (recortes) de cada letra.
+        - mask_full_size: Máscara binaria del tamaño de roi_color (para debug).
+    """
+    if roi_color is None or roi_color.size == 0: 
+        return [], np.zeros((10,10), dtype=np.uint8)
 
-def segmentar_caracteres(roi_color, nombre_debug="", visualizar=False):
-    if roi_color is None or roi_color.size == 0:
-        return []
-
-    # --- 1. PREPROCESAMIENTO ---
     h, w = roi_color.shape[:2]
-    my = int(h * 0.12)
-    mx = int(w * 0.04)
-    roi = roi_color[my:h-my, mx:w-mx]
-    if roi.size == 0: return []
-
-    # Escala de grises
+    
+    # 1. RECORTE DE SEGURIDAD (Eliminar marcos)
+    # Ajusta estos porcentajes si tus patentes están muy pegadas al borde
+    my_top, my_bot = int(h * 0.10), int(h * 0.98)
+    mx_left, mx_right = int(w * 0.02), int(w * 0.98)
+    roi = roi_color[my_top:my_bot, mx_left:mx_right]
+    
+    # 2. PREPROCESAMIENTO (CLAHE + Bilateral)
     gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-    # --- 2. REALCE DE DETALLES (Black-Hat) ---
-    kernel_bh = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 10))
-    blackhat = cv2.morphologyEx(gris, cv2.MORPH_BLACKHAT, kernel_bh)
-    blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
-
-    # --- 3. ENGROSAMIENTO EN GRISES ---
-    # Variable que queremos graficar
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    blackhat_dilatada = cv2.dilate(blackhat, kernel_dilate, iterations=1)
-
-    # --- 4. BINARIZACIÓN ---
-    _, binaria = cv2.threshold(blackhat_dilatada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Limpieza de bordes
-    h_r, w_r = binaria.shape
-    cv2.rectangle(binaria, (0,0), (w_r, h_r), 0, 2)
-
-    # --- 5. ANÁLISIS DE CONTORNOS ---
-    contornos, _ = cv2.findContours(binaria, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # CLAHE: Ecualización local para combatir sombras (Vital para tu caso)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gris = clahe.apply(gris)
     
-    # --- VISUALIZACIÓN EXTRA: Contornos Raw ---
-    # Dibujamos TODOS los contornos encontrados antes de filtrar
-    img_contornos_raw = roi.copy()
-    cv2.drawContours(img_contornos_raw, contornos, -1, (0, 0, 255), 1) # Rojo
+    # Bilateral: Reduce ruido manteniendo bordes
+    gris = cv2.bilateralFilter(gris, 11, 17, 17)
+    
+    # 3. BINARIZACIÓN
+    binaria = cv2.adaptiveThreshold(gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                    cv2.THRESH_BINARY_INV, 13, 5)
 
+    contornos, _ = cv2.findContours(binaria, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    
+    mask_roi = np.zeros_like(gris, dtype=np.uint8)
+    h_roi, w_roi = binaria.shape
     candidatos = []
-    area_total = h_r * w_r
-    
-    if visualizar: img_debug = roi.copy()
 
     for cnt in contornos:
         x, y, w_c, h_c = cv2.boundingRect(cnt)
         area = cv2.contourArea(cnt)
-        
-        # --- FILTROS GEOMÉTRICOS ---
-        if h_c < 0.35 * h_r: continue
-        if area < 0.015 * area_total: continue
-
         ratio = w_c / float(h_c)
-        if ratio > 6.0: continue 
+        if area < 30: continue               
+        if h_c < 0.25 * h_roi: continue       
+        if ratio < 0.15: continue          
+        if ratio > 1.5: continue             
+        cv2.drawContours(mask_roi, [cnt], -1, 255, thickness=cv2.FILLED)
+        
+        candidatos.append((x, roi[y:y+h_c, x:x+w_c]))
 
-        # LÓGICA DE SEPARACIÓN
-        if ratio > 0.85:
-            n_cortes = max(2, int(round(ratio / 0.45)))
-            ancho_corte = w_c // n_cortes
-            
-            for k in range(n_cortes):
-                nx = x + k*ancho_corte
-                nw = min(ancho_corte, (x + w_c) - nx)
-                candidatos.append((nx, roi[y:y+h_c, nx:nx+nw]))
-                if visualizar: cv2.rectangle(img_debug, (nx, y), (nx+nw, y+h_c), (0, 255, 255), 2)
-        else:
-            candidatos.append((x, roi[y:y+h_c, x:x+w_c]))
-            if visualizar: cv2.rectangle(img_debug, (x, y), (x+w_c, y+h_c), (0, 255, 0), 2)
+    mask_full_size = np.zeros((h, w), dtype=np.uint8)
+    mask_full_size[my_top:my_bot, mx_left:mx_right] = mask_roi
 
+    # 7. ORDENAR Y RETORNAR
     candidatos.sort(key=lambda c: c[0])
     caracteres_finales = [c[1] for c in candidatos]
 
-    # --- DEBUG ACTUALIZADO ---
     if visualizar:
-        # Aumentamos el tamaño de la figura para que entren 6 gráficos cómodos
-        plt.figure(figsize=(12, 6)) 
-        plt.suptitle(f"Proceso Detallado: {nombre_debug}", fontsize=14)
-
-        # 1. Gris original
-        plt.subplot(2, 3, 1)
-        plt.imshow(gris, cmap='gray')
-        plt.title("1. Gris")
-        plt.axis('off')
-
-        # 2. Black-Hat (letras extraídas)
-        plt.subplot(2, 3, 2)
-        plt.imshow(blackhat, cmap='gray')
-        plt.title("2. Black-Hat")
-        plt.axis('off')
-
-        # 3. Dilatación (NUEVO)
-        plt.subplot(2, 3, 3)
-        plt.imshow(blackhat_dilatada, cmap='gray')
-        plt.title("3. Gris Dilatado (Engrosado)")
-        plt.axis('off')
-
-        # 4. Binaria (Otsu)
-        plt.subplot(2, 3, 4)
-        plt.imshow(binaria, cmap='gray')
-        plt.title("4. Binaria (+Otsu)")
-        plt.axis('off')
-
-        # 5. Contornos Raw (NUEVO)
-        plt.subplot(2, 3, 5)
-        # Convertimos a RGB para ver el rojo
-        plt.imshow(cv2.cvtColor(img_contornos_raw, cv2.COLOR_BGR2RGB))
-        plt.title(f"5. Contornos Raw ({len(contornos)})")
-        plt.axis('off')
-
-        # 6. Finales Filtrados
-        plt.subplot(2, 3, 6)
-        plt.imshow(cv2.cvtColor(img_debug, cv2.COLOR_BGR2RGB))
-        plt.title(f"6. Finales ({len(caracteres_finales)})")
-        plt.axis('off')
-
-        plt.tight_layout()
+        plt.figure(figsize=(10, 3))
+        plt.subplot(1, 3, 1); plt.imshow(gris, cmap='gray'); plt.title("1. Gris (CLAHE)")
+        plt.subplot(1, 3, 2); plt.imshow(binaria, cmap='gray'); plt.title("2. Binaria (Vertical)")
+        plt.subplot(1, 3, 3); plt.imshow(mask_roi, cmap='gray'); plt.title("3. Máscara Final")
         plt.show()
 
-    return caracteres_finales
+    return caracteres_finales, mask_full_size
 
 # =============================================================================
-# --- MAIN ---
+# --- MAIN PARA DEBUGEAR ---
 # =============================================================================
 if __name__ == '__main__':
-    plt.rcParams['figure.figsize'] = [12, 6]
-    lista_patentes = []
-
-    print("Iniciando procesamiento...")
+    # Configuración de Matplotlib
+    plt.rcParams['figure.figsize'] = [14, 8]
+    
+    # Aquí simulamos tu lista de archivos. 
+    # Asegúrate de que 'obtener_recorte' esté disponible o carga las imágenes directamente.
+    lista_resultados = []
+    
+    print(">>> Iniciando Debugging Visual...")
 
     for i in range(1, 13):
-        nombre_archivo = f'img{i:02d}.png'
+        nombre_archivo = f'img{i:02d}.png' # Ojo con la ruta
         
-        recorte_patente = obtener_recorte_sin_padding(nombre_archivo, visualizar=False) 
-        
+        recorte_patente = obtener_recorte(nombre_archivo, mostrar_pasos=False)
         if recorte_patente is not None:
-            print(f"-> Analizando {nombre_archivo}...")
-            # Visualizar=True para confirmar
-            caracteres = segmentar_caracteres(recorte_patente, nombre_debug=nombre_archivo, visualizar=True)
+            print(f"Procesando: {nombre_archivo}")
             
-            lista_patentes.append({
-                "nombre": nombre_archivo, 
-                "imagen_patente": recorte_patente,
-                "caracteres": caracteres
+            caracteres, mascara = segmentar_caracteres(recorte_patente, visualizar=True)
+            img_debug = recorte_patente.copy()
+            img_debug[mascara == 255] = [0, 255, 0]
+
+            lista_resultados.append({
+                "nombre": nombre_archivo,
+                "original": recorte_patente,
+                "debug": img_debug,
+                "chars": caracteres
             })
         else:
-            print(f"[{nombre_archivo}] FALLO en Parte A.")
+            print(f"[{nombre_archivo}] No se detectó patente.")
 
-    if lista_patentes:
-        filas = len(lista_patentes)
-        plt.figure(figsize=(12, filas * 1.5))
-        plt.suptitle("RESULTADOS FINALES", fontsize=16)
+
+    if lista_resultados:
+        n_filas = len(lista_resultados)
+        n_cols = 9 
         
-        for i, item in enumerate(lista_patentes):
-            plt.subplot(filas, 8, i * 8 + 1)
-            plt.imshow(cv2.cvtColor(item['imagen_patente'], cv2.COLOR_BGR2RGB))
+        plt.figure(figsize=(15, n_filas * 2))
+        plt.suptitle("DEBUG SEGMENTACIÓN: Original vs Máscara Detectada", fontsize=16)
+        
+        for idx, item in enumerate(lista_resultados):
+            base = idx * n_cols
+            
+            plt.subplot(n_filas, n_cols, base + 1)
+            plt.imshow(cv2.cvtColor(item['original'], cv2.COLOR_BGR2RGB))
             plt.ylabel(item['nombre'], rotation=0, labelpad=40, va='center', fontsize=9)
             plt.xticks([]); plt.yticks([])
+            if idx == 0: plt.title("Original")
+
+            plt.subplot(n_filas, n_cols, base + 2)
+            plt.imshow(cv2.cvtColor(item['debug'], cv2.COLOR_BGR2RGB))
+            plt.axis('off')
+            if idx == 0: plt.title("Mascara Aplicada")
             
-            chars = item['caracteres']
-            for j in range(min(len(chars), 7)): 
-                plt.subplot(filas, 8, i * 8 + 2 + j)
+            # Cols 3-9: Caracteres recortados
+            chars = item['chars']
+            for j in range(min(len(chars), 7)):
+                plt.subplot(n_filas, n_cols, base + 3 + j)
                 plt.imshow(cv2.cvtColor(chars[j], cv2.COLOR_BGR2RGB))
                 plt.axis('off')
+
+        plt.tight_layout()
         plt.show()
