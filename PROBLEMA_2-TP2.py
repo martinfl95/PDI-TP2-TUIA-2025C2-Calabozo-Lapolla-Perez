@@ -256,7 +256,6 @@ def segmentar_caracteres(roi_color, nombre_debug="", visualizar=False):
         return []
 
     # --- 1. PREPROCESAMIENTO ---
-    # Recorte para eliminar marcos (12% Y, 4% X)
     h, w = roi_color.shape[:2]
     my = int(h * 0.12)
     mx = int(w * 0.04)
@@ -267,32 +266,30 @@ def segmentar_caracteres(roi_color, nombre_debug="", visualizar=False):
     gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # --- 2. REALCE DE DETALLES (Black-Hat) ---
-    # Extrae las letras oscuras del fondo claro/sombreado.
     kernel_bh = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 10))
     blackhat = cv2.morphologyEx(gris, cv2.MORPH_BLACKHAT, kernel_bh)
-    
-    # Aumentar contraste del resultado (normalizar 0-255)
     blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
 
-    # --- 3. ENGROSAMIENTO EN GRISES (La clave) ---
-    # Dilatamos la imagen GRIS. Esto hace que las partes brillantes (letras)
-    # se expandan suavemente hacia afuera, conectando trazos rotos.
-    # Es mucho más suave que dilatar una imagen binaria.
+    # --- 3. ENGROSAMIENTO EN GRISES ---
+    # Variable que queremos graficar
     kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     blackhat_dilatada = cv2.dilate(blackhat, kernel_dilate, iterations=1)
 
     # --- 4. BINARIZACIÓN ---
-    # Ahora Otsu encuentra un umbral perfecto porque las letras son sólidas.
-    # Usamos THRESH_BINARY porque en Black-Hat las letras son blancas.
     _, binaria = cv2.threshold(blackhat_dilatada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Limpieza de bordes (marco negro de 2px)
+    
+    # Limpieza de bordes
     h_r, w_r = binaria.shape
     cv2.rectangle(binaria, (0,0), (w_r, h_r), 0, 2)
 
     # --- 5. ANÁLISIS DE CONTORNOS ---
     contornos, _ = cv2.findContours(binaria, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
+    # --- VISUALIZACIÓN EXTRA: Contornos Raw ---
+    # Dibujamos TODOS los contornos encontrados antes de filtrar
+    img_contornos_raw = roi.copy()
+    cv2.drawContours(img_contornos_raw, contornos, -1, (0, 0, 255), 1) # Rojo
+
     candidatos = []
     area_total = h_r * w_r
     
@@ -303,50 +300,73 @@ def segmentar_caracteres(roi_color, nombre_debug="", visualizar=False):
         area = cv2.contourArea(cnt)
         
         # --- FILTROS GEOMÉTRICOS ---
-        
-        # A. Altura: Mínimo 35% de la altura total.
         if h_c < 0.35 * h_r: continue
-        
-        # B. Área: Mínimo 1.5% del área total.
         if area < 0.015 * area_total: continue
 
-        # C. Relación de Aspecto (Ancho/Alto)
         ratio = w_c / float(h_c)
-        
-        if ratio > 6.0: continue # Ruido horizontal muy fino
+        if ratio > 6.0: continue 
 
-        # LÓGICA DE SEPARACIÓN MEJORADA
-        # Si es muy ancho (> 0.85 ratio), cortamos.
+        # LÓGICA DE SEPARACIÓN
         if ratio > 0.85:
-            # Estimación de cuántas letras hay
-            # Asumimos una letra tiene ratio ~0.45
             n_cortes = max(2, int(round(ratio / 0.45)))
             ancho_corte = w_c // n_cortes
             
             for k in range(n_cortes):
                 nx = x + k*ancho_corte
-                # Asegurar que no nos pasamos del ancho original
                 nw = min(ancho_corte, (x + w_c) - nx)
-                
                 candidatos.append((nx, roi[y:y+h_c, nx:nx+nw]))
                 if visualizar: cv2.rectangle(img_debug, (nx, y), (nx+nw, y+h_c), (0, 255, 255), 2)
         else:
-            # Caracter único
             candidatos.append((x, roi[y:y+h_c, x:x+w_c]))
             if visualizar: cv2.rectangle(img_debug, (x, y), (x+w_c, y+h_c), (0, 255, 0), 2)
 
-    # Ordenar
     candidatos.sort(key=lambda c: c[0])
     caracteres_finales = [c[1] for c in candidatos]
 
-    # --- DEBUG ---
+    # --- DEBUG ACTUALIZADO ---
     if visualizar:
-        plt.figure(figsize=(10, 3))
-        plt.suptitle(f"Proceso: {nombre_debug}")
-        plt.subplot(1, 4, 1); plt.imshow(gris, cmap='gray'); plt.title("1. Gris")
-        plt.subplot(1, 4, 2); plt.imshow(blackhat, cmap='gray'); plt.title("2. Black-Hat")
-        plt.subplot(1, 4, 3); plt.imshow(binaria, cmap='gray'); plt.title("3. Binaria")
-        plt.subplot(1, 4, 4); plt.imshow(cv2.cvtColor(img_debug, cv2.COLOR_BGR2RGB)); plt.title(f"4. Final ({len(caracteres_finales)})")
+        # Aumentamos el tamaño de la figura para que entren 6 gráficos cómodos
+        plt.figure(figsize=(12, 6)) 
+        plt.suptitle(f"Proceso Detallado: {nombre_debug}", fontsize=14)
+
+        # 1. Gris original
+        plt.subplot(2, 3, 1)
+        plt.imshow(gris, cmap='gray')
+        plt.title("1. Gris")
+        plt.axis('off')
+
+        # 2. Black-Hat (letras extraídas)
+        plt.subplot(2, 3, 2)
+        plt.imshow(blackhat, cmap='gray')
+        plt.title("2. Black-Hat")
+        plt.axis('off')
+
+        # 3. Dilatación (NUEVO)
+        plt.subplot(2, 3, 3)
+        plt.imshow(blackhat_dilatada, cmap='gray')
+        plt.title("3. Gris Dilatado (Engrosado)")
+        plt.axis('off')
+
+        # 4. Binaria (Otsu)
+        plt.subplot(2, 3, 4)
+        plt.imshow(binaria, cmap='gray')
+        plt.title("4. Binaria (+Otsu)")
+        plt.axis('off')
+
+        # 5. Contornos Raw (NUEVO)
+        plt.subplot(2, 3, 5)
+        # Convertimos a RGB para ver el rojo
+        plt.imshow(cv2.cvtColor(img_contornos_raw, cv2.COLOR_BGR2RGB))
+        plt.title(f"5. Contornos Raw ({len(contornos)})")
+        plt.axis('off')
+
+        # 6. Finales Filtrados
+        plt.subplot(2, 3, 6)
+        plt.imshow(cv2.cvtColor(img_debug, cv2.COLOR_BGR2RGB))
+        plt.title(f"6. Finales ({len(caracteres_finales)})")
+        plt.axis('off')
+
+        plt.tight_layout()
         plt.show()
 
     return caracteres_finales
