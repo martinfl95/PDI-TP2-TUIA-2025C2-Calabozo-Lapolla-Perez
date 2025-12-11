@@ -205,7 +205,7 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     return roi_patente
 
 
-def filtrar_por_agrupacion(candidatos_info):
+def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_y = 0.7, tol_area=0.6):
     if not candidatos_info:
         return []
 
@@ -221,10 +221,6 @@ def filtrar_por_agrupacion(candidatos_info):
     mediana_h = np.median(alturas)
     mediana_y = np.median(y_coords)
     mediana_area = np.median(areas)
-
-    tol_h = 0.15
-    tol_y = 0.7
-    tol_area = 0.6
 
     aprobados = []
 
@@ -264,40 +260,152 @@ def filtrar_por_agrupacion(candidatos_info):
 
     return aprobados
 
+def extraer_roi_interno(img_color):
+    """Calcula márgenes y devuelve el ROI recortado y sus coordenadas."""
+    alto, ancho = img_color.shape[:2]
+    margen_sup = int(alto * 0.10)
+    margen_inf = int(alto * 0.98)
+    margen_izq = int(ancho * 0.02)
+    margen_der = int(ancho * 0.98)
+    
+    roi = img_color[margen_sup:margen_inf, margen_izq:margen_der]
+    return roi, (margen_sup, margen_inf, margen_izq, margen_der)
+
+def generar_recortes_y_mascara(roi_color, labels, candidatos, pad=0):
+    """
+    Recorre los candidatos validados, genera los recortes, 
+    la máscara binaria y la imagen con bounding boxes.
+    """
+    h_roi, w_roi = roi_color.shape[:2]
+    roi_gris = cv2.cvtColor(roi_color, cv2.COLOR_BGR2GRAY)
+    
+    mascara_roi = np.zeros_like(roi_gris, dtype=np.uint8)
+    lista_recortes = []
+    img_debug = roi_color.copy()
+
+    for c in candidatos:
+        x, y, w, h = c['x'], c['y'], c['w'], c['h']
+        idx = c['label_idx']
+        
+        mascara_roi[labels == idx] = 255
+        
+        #Calcular coordenadas con padding
+        y1 = max(0, y - pad)
+        y2 = min(h_roi, y + h + pad)
+        x1 = max(0, x - pad)
+        x2 = min(w_roi, x + w + pad)
+        
+        #Guardar recorte
+        roi_recorte = roi_color[y1:y2, x1:x2]
+        lista_recortes.append(roi_recorte)
+
+        #Dibujar bounding box
+        cv2.rectangle(img_debug, (x1, y1), (x2, y2), (0, 255, 0), 1)
+
+    return lista_recortes, mascara_roi, img_debug
+
+def graficar_resultados(img_gris, img_binaria, img_debug, mascara, titulo_main, titulo_bin):
+    """Genera la figura de 4 pasos con títulos personalizados."""
+    plt.figure(figsize=(12, 4))
+    plt.suptitle(titulo_main, fontsize=14, fontweight='bold')
+
+    plt.subplot(1, 4, 1)
+    plt.imshow(img_gris, cmap='gray')
+    plt.title("Entrada (ROI)")
+
+    plt.subplot(1, 4, 2)
+    plt.imshow(img_binaria, cmap='gray')
+    plt.title(titulo_bin)
+
+    plt.subplot(1, 4, 3)
+    plt.imshow(cv2.cvtColor(img_debug, cv2.COLOR_BGR2RGB))
+    plt.title("Detecciones")
+
+    plt.subplot(1, 4, 4)
+    plt.imshow(mascara, cmap='gray')
+    plt.title(f"Mascara Final ({len(candidatos_finales) if 'candidatos_finales' in locals() else 'Detectados'})")
+
+    plt.tight_layout()
+    plt.show()
+
+def crear_mascara_completa(shape_orig, mascara_roi, margenes):
+    """Pega la máscara del roi dentro de una máscara del tamaño original."""
+    alto, ancho = shape_orig
+    m_sup, m_inf, m_izq, m_der = margenes
+    
+    mascara_full = np.zeros((alto, ancho), dtype=np.uint8)
+    if (m_inf > m_sup) and (m_der > m_izq):
+        mascara_full[m_sup:m_inf, m_izq:m_der] = mascara_roi
+        
+    return mascara_full
+
+def segmentar_fallback(region_interes_color, visualizar=False):
+    #Extracción de roi
+    roi, margenes = extraer_roi_interno(region_interes_color)
+    h_roi, w_roi = roi.shape[:2]
+    imagen_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    #Decidimos realizar una umbralización diferente, en este caso utilizando OTSU
+    #Observamos que performaba mejor para las patentes 2, 3 y 11 pero que debíamos ajustar el umbral
+    #para lograr mejores resultados
+    ret, _ = cv2.threshold(imagen_gris, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    #Modificación del umbral
+    nuevo_umbral = ret + 30
+    _, imagen_binaria = cv2.threshold(imagen_gris, nuevo_umbral, 255, cv2.THRESH_BINARY)
+    
+    #Componentes 8-conectados
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(imagen_binaria, connectivity=8)
+
+    candidatos_validos = []
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+        #Si la altura del componente es menor a 5 pixeles no es una letra
+        #Lo mismo si es un area muy pequeña
+        if h < 5 or area < 10: continue 
+        
+        candidatos_validos.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': area, 'label_idx': i})
+
+    #Utilizamos el mismo filtro de altura, area y alineación
+    candidatos_finales = filtrar_por_agrupacion(candidatos_validos)
+    candidatos_finales.sort(key=lambda c: c['x'])
+    
+    #Reconstrucción del roi patente con los bounding box de cada letra
+    recortes, mascara_roi, img_debug = generar_recortes_y_mascara(roi, labels, candidatos_finales, pad=1)
+    mascara_full = crear_mascara_completa(region_interes_color.shape[:2], mascara_roi, margenes)
+    
+    if visualizar:
+        graficar_resultados(
+            imagen_gris, imagen_binaria, img_debug, mascara_roi,
+            titulo_main="FALLBACK - Otsu Modificado",
+            titulo_bin="Binaria (Otsu+30)"
+        )
+
+    return recortes, mascara_full
+
 
 def segmentar_caracteres(region_interes_color, visualizar=False):
-
     if region_interes_color is None or region_interes_color.size == 0:
         return [], np.zeros((10, 10), dtype=np.uint8)
 
-    alto_roi, ancho_roi = region_interes_color.shape[:2]
-    # Hacemos un recorte previo al analisis para eliminar ruido de fondo
-    margen_sup = int(alto_roi * 0.10)
-    margen_inf = int(alto_roi * 0.98)
-    margen_izq = int(ancho_roi * 0.02)
-    margen_der = int(ancho_roi * 0.98)
+    #Generamos el roi
+    roi, margenes = extraer_roi_interno(region_interes_color)
+    h_roi, w_roi = roi.shape[:2]
+    imagen_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    # ROI
-    region_interes = region_interes_color[margen_sup:margen_inf,
-                                          margen_izq:margen_der]
-    h_roi, w_roi = region_interes.shape[:2]
-    imagen_gris = cv2.cvtColor(region_interes, cv2.COLOR_BGR2GRAY)
     # Filtro bilateral para suavizado
     imagen_filtrada = cv2.bilateralFilter(imagen_gris, 11, 17, 17)
-
+    
     # Umbralado
     imagen_binaria = cv2.adaptiveThreshold(
-        imagen_filtrada,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        9,
-        0
+        imagen_filtrada, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 9, 0
     )
     
     # Componentes 4-conectados
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        imagen_binaria, connectivity=4)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(imagen_binaria, connectivity=4)
 
     candidatos_validos = []
     #Ignoramos el background, empezamos de 1 hasta num_labels
@@ -308,78 +416,37 @@ def segmentar_caracteres(region_interes_color, visualizar=False):
         h = stats[i, cv2.CC_STAT_HEIGHT]
         area = stats[i, cv2.CC_STAT_AREA]
 
-        if h == 0:
-            continue
-        
+        if h == 0: continue
+        if area < 20: continue 
         #filtro de area mínima
-        if area < 20:
-            continue
+        candidatos_validos.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': area, 'label_idx': i})
         
-        candidatos_validos.append({
-            'x': x, 'y': y, 'w': w, 'h': h, 'area': area,
-            'label_idx': i
-        })
-
     #Filtrado por alineación vertical, alto de caracter y area de caracter
     candidatos_finales = filtrar_por_agrupacion(candidatos_validos)
 
+    #Método de fallback en caso de no encontrar los 6 caracteres efectivamente
+    if len(candidatos_finales) < 6:
+        recortes_fb, mascara_fb = segmentar_fallback(region_interes_color, visualizar)
+        #Elegimos el mejor resultado de los dos en caso de no lograr una detección total
+        if len(recortes_fb) > len(candidatos_finales):
+            return recortes_fb, mascara_fb
+        
     #Ordenados por 'x' para mantener el orden de caracteres de la patente
     candidatos_finales.sort(key=lambda c: c['x'])
 
-    mascara_roi = np.zeros_like(imagen_gris, dtype=np.uint8)
-    lista_recortes = []
     #Reconstrucción del roi patente con los bounding box de cada letra
-    imagen_con_cajas = region_interes.copy()
-    
-    #Padding (no necesario - setear en 0 para la salida sin padding)
-    pad = 1
-    for c in candidatos_finales:
-        x_1, y_1, w_1, h_1 = c['x'], c['y'], c['w'], c['h']
-        idx = c['label_idx']
-        x_pad = max(0, x_1 - pad)
-        y_pad = max(0, y_1 - pad)
+    recortes, mascara_roi, img_debug = generar_recortes_y_mascara(roi, labels, candidatos_finales, pad=1)
+    mascara_full = crear_mascara_completa(region_interes_color.shape[:2], mascara_roi, margenes)
 
-        x2_pad = min(w_roi, x_1 + w_1 + pad)
-        y2_pad = min(h_roi, y_1 + h_1 + pad)
-
-        #Nuevas dimensiones para visualización
-        w_pad = x2_pad - x_pad
-        h_pad = y2_pad - y_pad
-
-        mascara_roi[labels == idx] = 255
-
-        roi_recorte = region_interes[y_pad:y2_pad, x_pad:x2_pad]
-        lista_recortes.append(roi_recorte)
-
-        cv2.rectangle(imagen_con_cajas, (x_pad, y_pad),
-                      (x_pad + w_pad, y_pad + h_pad), (0, 255, 0), 1)
-
-    mascara_tamaño_completo = np.zeros((alto_roi, ancho_roi), dtype=np.uint8)
-
-    if margen_inf > margen_sup and margen_der > margen_izq:
-        mascara_tamaño_completo[margen_sup:margen_inf,
-                                margen_izq:margen_der] = mascara_roi
-    else:
-        mascara_tamaño_completo = mascara_roi  # Fallback
-
+    #Visualización
     if visualizar:
-        plt.figure(figsize=(12, 4))
-        plt.subplot(1, 4, 1)
-        plt.imshow(imagen_gris, cmap='gray')
-        plt.title("Entrada (ROI)")
-        plt.subplot(1, 4, 2)
-        plt.imshow(imagen_binaria, cmap='gray')
-        plt.title("Binaria")
-        plt.subplot(1, 4, 3)
-        plt.imshow(imagen_con_cajas)
-        plt.title("Detecciones")
-        plt.subplot(1, 4, 4)
-        plt.imshow(mascara_roi, cmap='gray')
-        plt.title(f"Mascara Final ({len(lista_recortes)})")
-        plt.tight_layout()
-        plt.show()
+        graficar_resultados(
+            imagen_gris, imagen_binaria, img_debug, mascara_roi,
+            titulo_main="FLUJO PRINCIPAL - Adaptativo",
+            titulo_bin="Binaria (Adaptativo)"
+        )
 
-    return lista_recortes, mascara_tamaño_completo
+    return recortes, mascara_full
 
 
 if __name__ == '__main__':
@@ -388,7 +455,7 @@ if __name__ == '__main__':
 
     lista_resultados = []
 
-    for i in range(1, 13):
+    for i in range(1,13):
         nombre_archivo = f'img{i:02d}.png'
 
         recorte_patente = obtener_recorte(nombre_archivo, mostrar_pasos=False)
