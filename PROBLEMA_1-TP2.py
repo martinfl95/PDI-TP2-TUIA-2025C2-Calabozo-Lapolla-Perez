@@ -396,9 +396,9 @@ if __name__ == '__main__':
     #Etapa 4: Normalización de contornos - Encontramos una elipse de minimo tamaño que regularice los contornos encontrados
     #Etapa 5: Clasificación Monedas - Utilizando el area de cada moneda diferenciamos los tipos
     #Etapa 6: Clasificacion Dados - Utilizando contornos internos y factor de forma encontramos el valor de la cara
-    etapas = []
-    graficar_monedas = False
-    graficar_clasificacion_monedas = False
+    etapas = [1,2,3]
+    graficar_monedas = True
+    graficar_clasificacion_monedas = True
     graficar_clasificacion_dados = True
     histograma_factor_forma = False
     histograma_areas = False
