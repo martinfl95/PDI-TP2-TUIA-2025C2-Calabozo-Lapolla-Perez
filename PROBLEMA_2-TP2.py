@@ -231,23 +231,7 @@ def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_y = 0.7, tol_area=0.
         # Alineación consistente
         if abs(c['y'] - mediana_y) > (mediana_h * tol_y):
             continue
-        umbral_doble = mediana_area * 1.7
-        #Caracteres pegados por un pixel
-        if c['area'] > umbral_doble:
-            w_mitad = c['w'] // 2
-            c1 = c.copy()
-            c1['w'] = w_mitad
-            c1['area'] = c1['w'] * c1['h']
-
-            c2 = c.copy()
-            c2['x'] = c['x'] + w_mitad
-            c2['w'] = c['w'] - w_mitad
-            c2['area'] = c2['w'] * c2['h']
-            aprobados.append(c1)
-            aprobados.append(c2)
-
-            continue
-
+        
         # Area consistente
         if abs(c['area'] - mediana_area) > (mediana_area * tol_area):
             ratio = c['w'] / c['h']
@@ -448,22 +432,148 @@ def segmentar_caracteres(region_interes_color, visualizar=False):
 
     return recortes, mascara_full
 
+## Funciones Exploratorias con Trackbars
+
+def escalar_para_visualizacion(imagen, factor=5):
+    alto, ancho = imagen.shape[:2]
+    return cv2.resize(imagen, (ancho * factor, alto * factor), interpolation=cv2.INTER_NEAREST)
+
+def explorar_ajuste_adaptativo(roi_color):
+    """
+    Slider para umbral adaptativo
+    Controles:
+    - Tamaño Bloque: Tamaño del vecindario.
+    - Constante C: Valor que se resta a la media.
+    """
+    if roi_color is None:
+        print("ROI vacía")
+        return
+
+    #Preprocesamiento
+    roi, _ = extraer_roi_interno(roi_color)
+    gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    
+    #Filtro bilateral para mantener consistencia con el método de segmentación adaptativa
+    filtrada = cv2.bilateralFilter(gris, 11, 17, 17)
+
+    nombre_ventana = "Ajuste: Adaptativo (q para salir)"
+    cv2.namedWindow(nombre_ventana)
+    
+    #Creación de trackbars para parámetros blockSize y C
+    cv2.createTrackbar("Tam. Bloque", nombre_ventana, 9, 50, lambda x: None)
+    cv2.createTrackbar("Constante C", nombre_ventana, 0, 50, lambda x: None)
+
+    print(f"--- Ajustando Adaptativo ---")
+    print("Presiona 'q' o 'ESC' en la ventana para confirmar y pasar a la siguiente.")
+
+    while True:
+        #Leer trackbars
+        tam_bloque = cv2.getTrackbarPos("Tam. Bloque", nombre_ventana)
+        constante_c = cv2.getTrackbarPos("Constante C", nombre_ventana)
+
+        #blockSize debe ser impar y mayor que 1
+        if tam_bloque < 3: tam_bloque = 3
+        if tam_bloque % 2 == 0: tam_bloque += 1
+
+        # Aplicar umbralado
+        imagen_binaria = cv2.adaptiveThreshold(
+            filtrada, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY, tam_bloque, constante_c
+        )
+
+        # Visualización con zoom
+        visualizacion = escalar_para_visualizacion(imagen_binaria)
+        cv2.imshow(nombre_ventana, visualizacion)
+        
+        #Interrumpir ejecución con 'q' o ESC
+        tecla = cv2.waitKey(1) & 0xFF
+        if tecla == ord('q') or tecla == 27:
+            break
+
+    cv2.destroyWindow(nombre_ventana)
+    print(f"Valores finales -> Tamaño Bloque: {tam_bloque}, C: {constante_c}")
+
+
+def explorar_ajuste_otsu_desplazamiento(roi_color):
+    """
+    Slider - Desplazamiento: Valor a sumar/restar al umbral de Otsu calculado.
+    """
+    if roi_color is None:
+        return
+
+    roi, _ = extraer_roi_interno(roi_color)
+    gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    #Calcular Otsu base
+    umbral_otsu, _ = cv2.threshold(gris, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    nombre_ventana = f"Ajuste: Otsu Base {int(umbral_otsu)} (q para salir)"
+    cv2.namedWindow(nombre_ventana)
+
+    # Mapeo del trackbar:
+    # Valor 50  -> Desplazamiento 0
+    # Valor 100  -> Desplazamiento +50
+    # Valor 0  -> Desplazamiento -50
+    
+    cv2.createTrackbar("Desplazamiento", nombre_ventana, 80, 100, lambda x: None)
+
+    print(f"--- Ajustando Otsu (Base: {umbral_otsu}) ---")
+    print("Presiona 'q' o 'ESC' en la ventana para confirmar y pasar a la siguiente.")
+    while True:
+        valor_trackbar = cv2.getTrackbarPos("Desplazamiento", nombre_ventana)
+        desplazamiento = valor_trackbar - 50
+        nuevo_umbral = umbral_otsu + desplazamiento
+
+        #El umbral debe estar entre 0 y 255
+        nuevo_umbral = max(0, min(255, nuevo_umbral))
+
+        #Umbralado manual con el nuevo umbral
+        _, imagen_binaria = cv2.threshold(gris, nuevo_umbral, 255, cv2.THRESH_BINARY)
+
+        #Visualización con zoom 
+        visualizacion = escalar_para_visualizacion(imagen_binaria)
+        
+        #Escribir el umbral actual en la imagen
+        texto_info = f"Umbral: {int(nuevo_umbral)} (Otsu{'+' if desplazamiento>=0 else ''}{desplazamiento})"
+        cv2.putText(visualizacion, texto_info, (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (127), 2)
+
+        cv2.imshow(nombre_ventana, visualizacion)
+        
+        #Interrumpir ejecución con 'q' o ESC
+        tecla = cv2.waitKey(1) & 0xFF
+        if tecla == ord('q') or tecla == 27:
+            break
+
+    cv2.destroyWindow(nombre_ventana)
 
 if __name__ == '__main__':
     # Configuración de Matplotlib para todos los plots
     plt.rcParams['figure.figsize'] = [14, 8]
-
+    
+    #True: Muestra los pasos para encontrar la patente
+    MOSTRAR_PASOS = True
+    
+    #True: Muestra la segmentación de caracteres
+    MOSTRAR_SEGMENTACION = True
+    
+    #True: Permite el analisis exploratorio de los parámetros de umbralado (adaptativo y otsu)
+    TRACKBARS = False
     lista_resultados = []
 
     for i in range(1,13):
         nombre_archivo = f'img{i:02d}.png'
 
-        recorte_patente = obtener_recorte(nombre_archivo, mostrar_pasos=False)
+        recorte_patente = obtener_recorte(nombre_archivo, mostrar_pasos=MOSTRAR_PASOS)
         if recorte_patente is not None:
+            
             print(f"Procesando: {nombre_archivo}")
+            if TRACKBARS:
+                explorar_ajuste_adaptativo(recorte_patente)
+                explorar_ajuste_otsu_desplazamiento(recorte_patente)
 
             caracteres, mascara = segmentar_caracteres(
-                recorte_patente, visualizar=True)
+                recorte_patente, visualizar=MOSTRAR_SEGMENTACION)
             img_debug = recorte_patente.copy()
             img_debug[mascara == 255] = [0, 255, 0]
 
