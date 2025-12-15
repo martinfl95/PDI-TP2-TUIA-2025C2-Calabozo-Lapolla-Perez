@@ -205,7 +205,7 @@ def obtener_recorte(ruta_imagen, mostrar_pasos=False):
     return roi_patente
 
 
-def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_y = 0.7, tol_area=0.6):
+def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_area=0.6):
     if not candidatos_info:
         return []
 
@@ -219,7 +219,6 @@ def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_y = 0.7, tol_area=0.
         return []
 
     mediana_h = np.median(alturas)
-    mediana_y = np.median(y_coords)
     mediana_area = np.median(areas)
 
     aprobados = []
@@ -227,9 +226,6 @@ def filtrar_por_agrupacion(candidatos_info, tol_h=0.15, tol_y = 0.7, tol_area=0.
     for c in candidatos_ordenados:
         # Altura consistente
         if abs(c['h'] - mediana_h) > (mediana_h * tol_h):
-            continue
-        # Alineación consistente
-        if abs(c['y'] - mediana_y) > (mediana_h * tol_y):
             continue
         
         # Area consistente
@@ -330,7 +326,7 @@ def segmentar_fallback(region_interes_color, visualizar=False):
     imagen_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     #Decidimos realizar una umbralización diferente, en este caso utilizando OTSU
-    #Observamos que performaba mejor para las patentes 2, 3 y 11 pero que debíamos ajustar el umbral
+    #Observamos que performaba mejor para las patentes 2, 3 y 10 pero que debíamos ajustar el umbral
     #para lograr mejores resultados
     ret, _ = cv2.threshold(imagen_gris, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     #Modificación del umbral
@@ -375,7 +371,7 @@ def segmentar_caracteres(region_interes_color, visualizar=False):
     if region_interes_color is None or region_interes_color.size == 0:
         return [], np.zeros((10, 10), dtype=np.uint8)
 
-    #Generamos el roi
+    # Generamos el roi
     roi, margenes = extraer_roi_interno(region_interes_color)
     h_roi, w_roi = roi.shape[:2]
     imagen_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -401,8 +397,9 @@ def segmentar_caracteres(region_interes_color, visualizar=False):
         area = stats[i, cv2.CC_STAT_AREA]
 
         if h == 0: continue
-        if area < 20: continue 
         #filtro de area mínima
+        if area < 20: continue 
+
         candidatos_validos.append({'x': x, 'y': y, 'w': w, 'h': h, 'area': area, 'label_idx': i})
         
     #Filtrado por alineación vertical, alto de caracter y area de caracter
@@ -552,10 +549,10 @@ if __name__ == '__main__':
     plt.rcParams['figure.figsize'] = [14, 8]
     
     #True: Muestra los pasos para encontrar la patente
-    MOSTRAR_PASOS = True
+    MOSTRAR_PASOS = False
     
     #True: Muestra la segmentación de caracteres
-    MOSTRAR_SEGMENTACION = True
+    MOSTRAR_SEGMENTACION = False
     
     #True: Permite el analisis exploratorio de los parámetros de umbralado (adaptativo y otsu)
     TRACKBARS = False
