@@ -326,7 +326,7 @@ def segmentar_fallback(region_interes_color, visualizar=False):
     imagen_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     #Decidimos realizar una umbralización diferente, en este caso utilizando OTSU
-    #Observamos que performaba mejor para las patentes 2, 3 y 10 pero que debíamos ajustar el umbral
+    #Observamos que performaba mejor para las patentes 2, 3, 10 y 11 pero que debíamos ajustar el umbral
     #para lograr mejores resultados
     ret, _ = cv2.threshold(imagen_gris, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     #Modificación del umbral
@@ -530,10 +530,6 @@ def explorar_ajuste_otsu_desplazamiento(roi_color):
         #Visualización con zoom 
         visualizacion = escalar_para_visualizacion(imagen_binaria)
         
-        #Escribir el umbral actual en la imagen
-        texto_info = f"Umbral: {int(nuevo_umbral)} (Otsu{'+' if desplazamiento>=0 else ''}{desplazamiento})"
-        cv2.putText(visualizacion, texto_info, (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (127), 2)
 
         cv2.imshow(nombre_ventana, visualizacion)
         
@@ -555,7 +551,7 @@ if __name__ == '__main__':
     MOSTRAR_SEGMENTACION = False
     
     #True: Permite el analisis exploratorio de los parámetros de umbralado (adaptativo y otsu)
-    TRACKBARS = False
+    TRACKBARS = True
     lista_resultados = []
 
     for i in range(1,13):
