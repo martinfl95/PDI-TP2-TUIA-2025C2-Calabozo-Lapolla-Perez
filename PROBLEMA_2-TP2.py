@@ -551,7 +551,7 @@ if __name__ == '__main__':
     MOSTRAR_SEGMENTACION = False
     
     #True: Permite el analisis exploratorio de los parámetros de umbralado (adaptativo y otsu)
-    TRACKBARS = True
+    TRACKBARS = False
     lista_resultados = []
 
     for i in range(1,13):
